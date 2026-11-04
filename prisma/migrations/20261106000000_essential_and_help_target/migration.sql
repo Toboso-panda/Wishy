@@ -1,0 +1,3 @@
+ALTER TABLE "Item"
+  ADD COLUMN "isEssential" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "helpersNeeded" INTEGER;

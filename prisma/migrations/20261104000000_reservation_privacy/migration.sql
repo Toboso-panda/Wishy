@@ -1,0 +1,2 @@
+ALTER TABLE "Event"
+ADD COLUMN IF NOT EXISTS "hideReservationNames" BOOLEAN NOT NULL DEFAULT true;
