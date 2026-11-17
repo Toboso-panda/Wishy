@@ -1,3 +1,5 @@
+"use client";
+
 import Link from "next/link";
 import type { Item } from "@prisma/client";
 import { createItem, updateItem } from "@/app/actions";
