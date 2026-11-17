@@ -1,37 +1,118 @@
-# Wishy — llistes de regals familiars
+# Wishy 🎄
 
-Aplicació autohostejada per crear esdeveniments familiars, compartir llistes de regals i coordinar reserves. Interfície en català.
+**Wishy** is a self-hosted family gift list app. Create family events, share wish lists, and coordinate reservations so nobody buys the same gift twice — while keeping the surprise for the recipient.
 
-El registre i l’inici de sessió fan servir correu i contrasenya (mínim 8 caràcters); no s’envien ni es verifiquen correus. No hi ha recuperació de contrasenya en aquesta versió.
+Built with Next.js 15, Prisma, and PostgreSQL. Interface available in **Catalan** and **Spanish**.
 
-## Executar amb Docker
+---
 
-1. Copia `.env.example` a `.env`.
-2. Genera un secret per a les sessions i configura’l a `.env`:
+## ✨ Features
 
-   ```bash
-   openssl rand -hex 32
-   ```
+- **Family events** — create events (Christmas, birthdays, etc.) and invite everyone with a single link.
+- **Per-member or shared lists** — each member can have their own list, or one shared list for the whole event.
+- **Gift cards** — add name, description, image, price, priority, category and notes.
+- **Reservations** — mark a gift as taken, shared (multiple contributors) or "needs help" (target number of people).
+- **Surprise mode** — hides reservation status from the recipient while keeping it visible to other guests.
+- **Family profiles** — create profiles without an account (e.g. for kids) and claim them later.
+- **Responsibilities** — assign one or more caretakers per profile, with optional list visibility.
+- **Essentials & ordering** — star essential gifts and reorder them with arrows.
+- **Multilingual** — Catalan and Spanish, switchable from the top bar.
+- **Docker-ready** — one `docker compose up` and you're running.
 
-3. (Recomanat) Canvia també `POSTGRES_PASSWORD` a `.env`.
-4. Executa:
+---
 
-   ```bash
-   docker compose up --build
-   ```
+## 🚀 Quick start (Docker)
 
-5. Obre [http://localhost:3000](http://localhost:3000).
+```bash
+git clone https://github.com/Toboso-panda/Wishy.git
+cd Wishy
+cp .env.example .env
+# generate a session secret
+openssl rand -hex 32   # paste into AUTH_SECRET
+# (recommended) change POSTGRES_PASSWORD
+docker compose up --build
+```
 
-Per accedir des de Tailscale, fes servir la IP o el nom del NAS dins la tailnet, per exemple `http://nas:3000`. Amb accés HTTP local, deixa `COOKIE_SECURE=false`; si configures HTTPS, posa-ho a `true`.
+Open [http://localhost:3000](http://localhost:3000).
 
-La base de dades persisteix al volum Docker `pgdata` i les imatges al volum `uploads`. Les migracions s’apliquen en iniciar el contenidor. El canvi de perfils provisionals a comptes esborra les dades de Wishy existents per començar net, tal com s’ha demanat. Per eliminar també totes les imatges pujades, executa una vegada `docker compose down -v` abans de tornar a iniciar; això elimina irreversiblement els volums de la base de dades i de les imatges.
+### Environment variables
 
-El mode sorpresa amaga l’estat de reserva i el progrés només al destinatari; la resta de convidats els veuen per coordinar-se. Es pot activar o desactivar a **Configuració → Mode sorpresa**. Les imatges acceptades són JPG/JPEG, PNG, WEBP i GIF, fins a 5 MB.
+| Variable | Description |
+|---|---|
+| `AUTH_SECRET` | Long random secret for sessions (`openssl rand -hex 32`) |
+| `POSTGRES_USER` | Postgres user (default `wishlist`) |
+| `POSTGRES_PASSWORD` | Postgres password |
+| `POSTGRES_DB` | Postgres database (default `wishlist`) |
+| `COOKIE_SECURE` | `true` if served over HTTPS |
+| `UPLOAD_DIR` | Uploads directory (default `./uploads`) |
+| `PORT` | App port (default `3000`) |
 
-Les targetes de regal permeten marcar imprescindibles amb una estrella i reordenar-les amb les fletxes. Les peticions d’ajuda admeten un objectiu de persones; el regal compta com a agafat en arribar-hi. Els administradors poden eliminar membres i qualsevol membre (excepte el propietari de l’esdeveniment) pot abandonar-lo.
+Data persists in the `pgdata` and `uploads` Docker volumes. Migrations run automatically on startup.
 
-Els administradors veuen i reserven regals com la resta de membres. A **Configuració → Membres** poden donar-se accés de responsable a tots els perfils; a **Perfils familiars i responsables** poden assignar diversos responsables per perfil i decidir si poden veure la llista. Els perfils familiars poden començar sense compte i activar-ne un després amb l’enllaç de reclamació. Els regals creats per un responsable queden amagats al destinatari, però visibles per a la resta de convidats.
+> To wipe everything (including uploaded images), run `docker compose down -v` once before restarting.
 
-## Desenvolupament local
+---
 
-Cal Node.js 22 i PostgreSQL. Copia `.env.example` a `.env`, instal·la dependències amb `npm install`, aplica les migracions amb `npx prisma migrate dev` i inicia amb `npm run dev`.
+## 🛠 Local development
+
+Requires Node.js 22 and PostgreSQL.
+
+```bash
+cp .env.example .env
+npm install
+npx prisma migrate dev
+npm run dev
+```
+
+Type-check with `npm run lint` (`tsc --noEmit`).
+
+---
+
+## 🐳 Deploying to a NAS
+
+The image can be built once and loaded on the NAS:
+
+```bash
+# on your machine
+docker build -t wishy-app:latest .
+docker save -o wishy-nas.tar wishy-app:latest postgres:16-alpine
+
+# on the NAS
+docker load -i wishy-nas.tar
+# use docker-compose.nas.yml (image instead of build) and start
+docker compose -f docker-compose.nas.yml up -d
+```
+
+Caddy / reverse-proxy example:
+
+```caddyfile
+wishy.example.com {
+    reverse_proxy 127.0.0.1:5678
+}
+```
+
+---
+
+## 📂 Project structure
+
+```
+src/
+  app/          # Next.js App Router pages & server actions
+  components/   # React components
+  lib/          # db, session, permissions, i18n
+prisma/         # schema & migrations
+Dockerfile
+docker-compose.yml
+```
+
+---
+
+## 🤝 Contributing
+
+Pull requests are welcome. Please keep changes consistent with the existing Catalan/Spanish UI and run `npm run lint` before submitting.
+
+## 📄 License
+
+Private project — all rights reserved.
+EOF
+echo "README written"

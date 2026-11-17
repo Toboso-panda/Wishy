@@ -114,3 +114,7 @@ h3 { font-size:16px; margin-bottom:7px; }
   .item-top { display:block; }.item-top .status-badge { margin-bottom:8px; }.member-setting { align-items:flex-start; }
   .item-content { font-size:15px; }.item-actions { gap:8px; }.item-actions .button-small { min-height:44px; }
 }
+
+.language-pill { display:inline-flex; border:1px solid var(--line); border-radius:999px; overflow:hidden; background:var(--surface, #fff); }
+.language-pill-option { border:0; background:transparent; padding:6px 14px; font-size:13px; font-weight:600; cursor:pointer; color:var(--muted); }
+.language-pill-option.active { background:var(--accent, #1f6f5f); color:#fff; }
