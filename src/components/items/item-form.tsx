@@ -3,7 +3,7 @@
 import Link from "next/link";
 import type { Item } from "@prisma/client";
 import { createItem, updateItem } from "@/app/actions";
-import { useLocale } from "@/components/locale-provider";
+import { useLocale } from "@/components/i18n/locale-provider";
 
 export function ItemForm({ eventId, listOwnerId, item, error }: { eventId: string; listOwnerId: string; item?: Item; error?: string }) {
   const { t } = useLocale();
@@ -14,7 +14,7 @@ export function ItemForm({ eventId, listOwnerId, item, error }: { eventId: strin
       <input type="hidden" name="eventId" value={eventId} /><input type="hidden" name="listOwnerId" value={listOwnerId} />
       {item && <input type="hidden" name="itemId" value={item.id} />}
       <div><p className="eyebrow">{t("Llista de regals")}</p><h2>{item ? t("Editar regal") : t("Afegir un regal")}</h2><p className="muted small">{t("Comparteix una idea; la resta de detalls són opcionals.")}</p></div>
-      {error && <p className="alert">{error}</p>}
+      {error && <p className="alert">{t(error)}</p>}
       <div className="field"><label htmlFor="name">{t("Nom del regal")} *</label><input id="name" name="name" required maxLength={120} defaultValue={item?.name || ""} placeholder={t("Per exemple, un llibre de cuina")} /></div>
       <details className="optional-details">
         <summary>{t("Afegir detalls opcionals")}</summary>

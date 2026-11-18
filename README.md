@@ -97,9 +97,12 @@ wishy.example.com {
 
 ```
 src/
-  app/          # Next.js App Router pages & server actions
-  components/   # React components
-  lib/          # db, session, permissions, i18n
+  app/              # Next.js App Router pages, server actions, global CSS
+  components/
+    layout/         # Top bar (with the snow cap) and footer
+    auth/ events/ items/ i18n/ ui/
+  lib/              # db, session, permissions, uploads
+    i18n/           # locale helpers and the Catalan → Spanish dictionary
 prisma/         # schema & migrations
 Dockerfile
 docker-compose.yml

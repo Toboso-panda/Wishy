@@ -1,8 +1,8 @@
 import "server-only";
 
-export type { Locale } from "./i18n-shared";
-export { LOCALES, DEFAULT_LOCALE, LOCALE_COOKIE, LOCALE_LABELS, isLocale } from "./i18n-shared";
-import type { Locale } from "./i18n-shared";
+export type { Locale } from "./shared";
+export { LOCALES, DEFAULT_LOCALE, LOCALE_COOKIE, LOCALE_LABELS, isLocale } from "./shared";
+import type { Locale } from "./shared";
 import { cookies } from "next/headers";
 
 export async function getLocale(): Promise<Locale> {
