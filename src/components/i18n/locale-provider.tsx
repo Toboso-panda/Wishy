@@ -1,8 +1,8 @@
 "use client";
 
 import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
-import type { Locale } from "@/lib/i18n-shared";
-import { translate } from "@/lib/dictionary";
+import type { Locale } from "@/lib/i18n/shared";
+import { translate } from "@/lib/i18n/dictionary";
 
 type LocaleContextValue = {
   locale: Locale;

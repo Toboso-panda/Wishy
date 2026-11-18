@@ -2,7 +2,7 @@ import Link from "next/link";
 import { claimManagedProfile } from "@/app/actions";
 import { prisma } from "@/lib/db";
 import { getLocale } from "@/lib/i18n";
-import { translate } from "@/lib/dictionary";
+import { translate } from "@/lib/i18n/dictionary";
 
 export default async function ClaimProfilePage({ params, searchParams }: { params: Promise<{ token: string }>; searchParams: Promise<{ error?: string }> }) {
   const { token } = await params;
@@ -16,7 +16,7 @@ export default async function ClaimProfilePage({ params, searchParams }: { param
   return <form action={claimManagedProfile} className="card form-card form-stack">
     <input type="hidden" name="token" value={token} />
     <div><p className="eyebrow">{t("El teu perfil familiar")}</p><h2>{t("Activa el perfil de")} {profile.name}</h2><p className="muted small">{t("Afegeix correu i contrasenya per entrar-hi directament i conservar la seva llista.")}</p></div>
-    {error && <p className="alert" role="alert">{error}</p>}
+    {error && <p className="alert" role="alert">{t(error)}</p>}
     <div className="field"><label htmlFor="email">{t("Correu electrònic")}</label><input id="email" name="email" type="email" autoComplete="email" required maxLength={254} /></div>
     <div className="field"><label htmlFor="password">{t("Contrasenya")}</label><input id="password" name="password" type="password" autoComplete="new-password" required minLength={8} maxLength={128} /></div>
     <div className="field"><label htmlFor="confirmPassword">{t("Repeteix la contrasenya")}</label><input id="confirmPassword" name="confirmPassword" type="password" autoComplete="new-password" required minLength={8} maxLength={128} /></div>

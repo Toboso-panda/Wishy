@@ -1,10 +1,10 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { AuthPanel } from "@/components/auth-panel";
+import { AuthPanel } from "@/components/auth/auth-panel";
 import { prisma } from "@/lib/db";
 import { currentUser } from "@/lib/session";
 import { getLocale } from "@/lib/i18n";
-import { translate } from "@/lib/dictionary";
+import { translate } from "@/lib/i18n/dictionary";
 
 export default async function JoinPage({ params, searchParams }: { params: Promise<{ token: string }>; searchParams: Promise<{ error?: string; mode?: string }> }) {
   const { token } = await params;

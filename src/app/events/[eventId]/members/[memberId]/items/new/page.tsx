@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { ItemForm } from "@/components/item-form";
+import { ItemForm } from "@/components/items/item-form";
 import { prisma } from "@/lib/db";
 import { requireItemEditor } from "@/lib/permissions";
 

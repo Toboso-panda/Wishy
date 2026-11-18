@@ -130,6 +130,27 @@ export async function updateEvent(data: FormData) {
   redirect(`${eventPath(eventId)}/settings?saved=1`);
 }
 
+// Only the owner can delete an event. Everything in it goes too: lists, gifts, photos and family profiles.
+export async function deleteEvent(data: FormData) {
+  const eventId = text(data, "eventId");
+  const confirmation = text(data, "confirmName");
+  const { membership, event } = await requireMembership(eventId);
+  const settings = `${eventPath(eventId)}/settings`;
+  if (membership.role !== "OWNER" || event.ownerId !== membership.userId) fail(settings, "Només el propietari pot eliminar l’esdeveniment.");
+  if (confirmation !== event.name) fail(settings, "Escriu el nom de l’esdeveniment exactament per confirmar-ho.");
+  const images = await prisma.$transaction(async (tx) => {
+    const items = await tx.item.findMany({ where: { eventId }, select: { imagePath: true } });
+    const profiles = await tx.eventMember.findMany({ where: { eventId, user: { isManagedProfile: true } }, select: { userId: true } });
+    await tx.event.delete({ where: { id: eventId } });
+    // Family profiles without an account only exist inside this event
+    if (profiles.length) await tx.user.deleteMany({ where: { id: { in: profiles.map((p) => p.userId) }, isManagedProfile: true, memberships: { none: {} } } });
+    return items.map((item) => item.imagePath);
+  });
+  await Promise.all(images.map(removeImage));
+  revalidatePath("/");
+  redirect("/?deleted=1");
+}
+
 export async function regenerateInvite(data: FormData) {
   const eventId = text(data, "eventId");
   const { membership } = await requireMembership(eventId);
@@ -262,7 +283,48 @@ export async function removeEventMember(data: FormData) {
   revalidatePath(eventPath(eventId));
   revalidatePath(`${eventPath(eventId)}/settings`);
   revalidatePath("/");
-  redirect(`${eventPath(eventId)}/settings?saved=1`);
+  redirect(text(data, "returnTo") === "event" ? `${eventPath(eventId)}?removed=1` : `${eventPath(eventId)}/settings?saved=1`);
+}
+
+// Organizers (owner and admins) can empty someone's list without removing them from the event.
+export async function clearMemberList(data: FormData) {
+  const eventId = text(data, "eventId");
+  const targetUserId = text(data, "userId");
+  const { membership } = await requireMembership(eventId);
+  const target = listPath(eventId, targetUserId);
+  if (!isManager(membership.role)) fail(target, "No tens permisos per fer aquesta acció.");
+  const targetMember = await prisma.eventMember.findUnique({ where: { eventId_userId: { eventId, userId: targetUserId } } });
+  if (!targetMember) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("Aquest membre ja no forma part de l’esdeveniment.")}`);
+  if (membership.role === "ADMIN" && targetMember.role !== "MEMBER" && targetUserId !== membership.userId) fail(target, "Un administrador només pot buidar llistes de membres normals.");
+  const images = await prisma.$transaction(async (tx) => {
+    const items = await tx.item.findMany({ where: { eventId, listOwnerId: targetUserId }, select: { imagePath: true } });
+    await tx.item.deleteMany({ where: { eventId, listOwnerId: targetUserId } });
+    return items.map((item) => item.imagePath);
+  });
+  await Promise.all(images.map(removeImage));
+  revalidatePath(eventPath(eventId));
+  revalidatePath(target);
+  redirect(`${target}?cleared=1`);
+}
+
+// Rename a family profile (a profile without an account). People with an account choose their own name.
+export async function renameManagedProfile(data: FormData) {
+  const eventId = text(data, "eventId");
+  const profileUserId = text(data, "userId");
+  const name = text(data, "name");
+  const returnTo = text(data, "returnTo") === "settings" ? `${eventPath(eventId)}/settings` : listPath(eventId, profileUserId);
+  const { user, membership } = await requireMembership(eventId);
+  const profileMember = await prisma.eventMember.findUnique({ where: { eventId_userId: { eventId, userId: profileUserId } }, include: { user: true } });
+  if (!profileMember) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("Aquest perfil ja no forma part de l’esdeveniment.")}`);
+  if (!profileMember.user.isManagedProfile) fail(returnTo, "Només es pot canviar el nom dels perfils familiars.");
+  const responsible = await prisma.profileResponsibility.count({ where: { eventId, profileUserId, responsibleUserId: user.id } });
+  if (!isManager(membership.role) && !responsible) fail(returnTo, "No tens permisos per fer aquesta acció.");
+  if (!name || name.length > 60) fail(returnTo, "El nom del perfil és obligatori (màxim 60 caràcters).");
+  await prisma.user.update({ where: { id: profileUserId }, data: { name } });
+  revalidatePath(eventPath(eventId));
+  revalidatePath(`${eventPath(eventId)}/settings`);
+  revalidatePath(listPath(eventId, profileUserId));
+  redirect(`${returnTo}?saved=1`);
 }
 
 export async function leaveEvent(data: FormData) {
@@ -399,6 +461,15 @@ export async function toggleItemEssential(data: FormData) {
   redirect(listPath(eventId, item.listOwnerId));
 }
 
+// A group gift is SHARED when no number is given, or HELP when it needs a set number of extra people.
+function groupMode(data: FormData, target: string): { reservationMode: ReservationMode; helpersNeeded: number | null } {
+  const input = text(data, "helpersNeeded");
+  if (!input) return { reservationMode: "SHARED", helpersNeeded: null };
+  const helpersNeeded = Number(input);
+  if (!Number.isInteger(helpersNeeded) || helpersNeeded < 1 || helpersNeeded > 99) fail(target, "Indica quantes persones més necessites, entre 1 i 99.");
+  return { reservationMode: "HELP", helpersNeeded };
+}
+
 export async function reserveItem(data: FormData) {
   const eventId = text(data, "eventId");
   const itemId = text(data, "itemId");
@@ -407,9 +478,10 @@ export async function reserveItem(data: FormData) {
   if (!item) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
   const target = listPath(eventId, item.listOwnerId);
   if (item.listOwnerId === user.id) fail(target, "No pots reservar un regal de la teva pròpia llista.");
+  const mode = text(data, "group") === "1" ? groupMode(data, target) : { reservationMode: "NONE" as ReservationMode, helpersNeeded: null };
   const result = await prisma.item.updateMany({
     where: { id: itemId, eventId, isActive: true, reservedById: null },
-    data: { reservedById: user.id, reservedAt: new Date(), reservationMode: "NONE", helpersNeeded: null },
+    data: { reservedById: user.id, reservedAt: new Date(), ...mode },
   });
   if (!result.count) fail(target, "Aquest regal ja està agafat.");
   revalidatePath(target);
@@ -438,19 +510,24 @@ export async function changeReservationMode(data: FormData) {
   const mode = text(data, "mode");
   const helpersNeededInput = text(data, "helpersNeeded");
   const { user, membership } = await requireMembership(eventId);
-  if (!(["NONE", "HELP", "SHARED"] as string[]).includes(mode)) fail(eventPath(eventId), "El tipus de regal no és vàlid.");
+  if (!(["NONE", "HELP", "SHARED", "GROUP"] as string[]).includes(mode)) fail(eventPath(eventId), "El tipus de regal no és vàlid.");
   const item = await prisma.item.findFirst({ where: { id: itemId, eventId } });
   if (!item) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
   const target = listPath(eventId, item.listOwnerId);
   if (item.reservedById !== user.id && !(await canModerateItemReservations(eventId, item, user.id))) fail(target, "Només qui ha reservat o un responsable d’aquesta llista pot canviar aquest estat.");
   if (!item.reservedById) fail(target, "Primer has de reservar el regal.");
-  const helpersNeeded = mode === "HELP" ? Number(helpersNeededInput) : null;
-  if (mode === "HELP" && (!Number.isInteger(helpersNeeded) || helpersNeeded! < 1 || helpersNeeded! > 99)) {
-    fail(target, "Indica quantes persones més necessites, entre 1 i 99.");
+  let next: { reservationMode: ReservationMode; helpersNeeded: number | null };
+  if (mode === "GROUP") next = groupMode(data, target);
+  else {
+    const helpersNeeded = mode === "HELP" ? Number(helpersNeededInput) : null;
+    if (mode === "HELP" && (!Number.isInteger(helpersNeeded) || helpersNeeded! < 1 || helpersNeeded! > 99)) {
+      fail(target, "Indica quantes persones més necessites, entre 1 i 99.");
+    }
+    next = { reservationMode: mode as ReservationMode, helpersNeeded };
   }
   await prisma.$transaction(async (tx) => {
-    await tx.item.update({ where: { id: itemId }, data: { reservationMode: mode as ReservationMode, helpersNeeded } });
-    if (mode === "NONE") await tx.itemContribution.deleteMany({ where: { itemId } });
+    await tx.item.update({ where: { id: itemId }, data: next });
+    if (next.reservationMode === "NONE") await tx.itemContribution.deleteMany({ where: { itemId } });
   });
   revalidatePath(target);
   redirect(target);

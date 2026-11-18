@@ -1,29 +1,34 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { Fraunces, Nunito } from "next/font/google";
 import "./globals.css";
 import "./christmas.css";
 import { currentUser } from "@/lib/session";
-import { logout } from "@/app/actions";
 import { getLocale } from "@/lib/i18n";
-import { LocaleProvider } from "@/components/locale-provider";
-import { LanguageSwitcher } from "@/components/language-switcher";
+import { translate } from "@/lib/i18n/dictionary";
+import { LocaleProvider } from "@/components/i18n/locale-provider";
+import { SiteHeader } from "@/components/layout/site-header";
+import { SiteFooter } from "@/components/layout/site-footer";
 
-export const metadata: Metadata = {
-  title: "Wishy — Llistes de regals 🎄",
-  description: "Llistes de regals per compartir en família aquestes festes.",
-};
+// Headings: a soft, rounded serif. Body: a friendly rounded sans-serif.
+const headingFont = Fraunces({ subsets: ["latin"], axes: ["SOFT", "opsz"], variable: "--font-fraunces", display: "swap" });
+const bodyFont = Nunito({ subsets: ["latin"], variable: "--font-nunito", display: "swap" });
+
+export async function generateMetadata(): Promise<Metadata> {
+  const locale = await getLocale();
+  return {
+    title: translate(locale, "Wishy — Llistes de regals 🎄"),
+    description: translate(locale, "Llistes de regals per compartir en família aquestes festes."),
+  };
+}
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const user = await currentUser();
   const locale = await getLocale();
-  return <html lang={locale}><body>
+  return <html lang={locale} className={`${headingFont.variable} ${bodyFont.variable}`}><body>
     <LocaleProvider initialLocale={locale}>
-      <header className="topbar"><div className="topbar-inner">
-        <Link href="/" className="brand"><span className="brand-mark">w</span> wishy</Link>
-        <div className="topbar-user">{user && <><span className="user-name">{locale === "es" ? "Hola" : "Hola"}, {user.name}</span><form action={logout}><button className="quiet-button" type="submit">{locale === "es" ? "Salir" : "Sortir"}</button></form></>}<LanguageSwitcher /></div>
-      </div></header>
+      <SiteHeader userName={user?.name} />
       <main className="page-shell">{children}</main>
-      <footer className="footer">{locale === "es" ? "❄ Hecho con cariño, para compartir regalos ❄" : "❄ Fet amb estima, per compartir regals ❄"}</footer>
+      <SiteFooter locale={locale} />
     </LocaleProvider>
   </body></html>;
 }

@@ -1,16 +1,17 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { CopyButton } from "@/components/copy-button";
-import { LeaveEventButton } from "@/components/member-controls";
+import { CopyButton } from "@/components/ui/copy-button";
+import { GiftList } from "@/components/lists/gift-list";
+import { LeaveEventButton } from "@/components/events/member-controls";
 import { createManagedProfile } from "@/app/actions";
 import { prisma } from "@/lib/db";
 import { canCreateManagedProfile, requireMembership, isManager } from "@/lib/permissions";
 import { getLocale } from "@/lib/i18n";
-import { translate } from "@/lib/dictionary";
+import { translate } from "@/lib/i18n/dictionary";
 
-export default async function EventDashboard({ params, searchParams }: { params: Promise<{ eventId: string }>; searchParams: Promise<{ error?: string }> }) {
+export default async function EventDashboard({ params, searchParams }: { params: Promise<{ eventId: string }>; searchParams: Promise<{ error?: string; removed?: string; saved?: string; cleared?: string }> }) {
   const { eventId } = await params;
-  const [{ error }, { user, membership }] = await Promise.all([searchParams, requireMembership(eventId)]);
+  const [{ error, removed, saved, cleared }, { user, membership }] = await Promise.all([searchParams, requireMembership(eventId)]);
   const locale = await getLocale();
   const t = (s: string) => translate(locale, s);
   const event = await prisma.event.findUnique({ where: { id: eventId }, include: {
@@ -36,10 +37,14 @@ export default async function EventDashboard({ params, searchParams }: { params:
         {event.listMode === "SINGLE_LIST" && event.primaryListOwner && <span>{t("Llista de")} {event.primaryListOwner.name}</span>}
       </div>
     </section>
-    {error && <p className="alert" style={{ marginTop: 16 }}>{error}</p>}
-    <div className="section-heading"><h2>{event.listMode === "SINGLE_LIST" ? t("La llista principal") : t("Llistes de membres")}</h2>{event.listMode === "EVERY_MEMBER_LIST" && <span className="muted small">{t("Tria una llista per veure els regals")}</span>}</div>
+    {error && <p className="alert" style={{ marginTop: 16 }}>{t(error)}</p>}
+    {removed && <p className="success-note" style={{ marginTop: 16 }}>{t("S’ha eliminat de l’esdeveniment.")}</p>}
+    {event.listMode === "SINGLE_LIST" && (event.primaryListOwnerId
+      ? <GiftList eventId={eventId} memberId={event.primaryListOwnerId} locale={locale} variant="embedded" flags={{ saved, cleared }} />
+      : <div className="empty-state"><h3>{t("Encara no hi ha ningú assignat a la llista")}</h3><p className="small">{t("El propietari pot triar de qui és la llista a la configuració.")}</p></div>)}
+    {event.listMode === "EVERY_MEMBER_LIST" && <div className="section-heading"><h2>{t("Llistes de membres")}</h2><span className="muted small">{t("Tria una llista per veure els regals")}</span></div>}
     {canCreateProfile && event.listMode === "EVERY_MEMBER_LIST" && <details className="profile-create-details"><summary>＋ {t("Afegir perfil familiar")}</summary><form action={createManagedProfile} className="profile-create-form"><input type="hidden" name="eventId" value={eventId} /><label htmlFor="managed-profile-name">{t("Nom del perfil familiar")}</label><input id="managed-profile-name" name="name" required maxLength={60} placeholder={t("Per exemple, Nil")} /><span className="field-help">{t("El perfil no necessita correu ni contrasenya. Podrà activar un compte més endavant.")}</span><button className="button button-primary" type="submit">{t("Crear perfil")}</button></form></details>}
-    <div className="member-grid">{visibleMembers.map((member) => {
+    {event.listMode === "EVERY_MEMBER_LIST" && <div className="member-grid">{visibleMembers.map((member) => {
       const viewerCannotSee = cannotViewProfileIds.has(member.userId) && member.userId !== user.id;
       const items = event.items.filter((item) => item.listOwnerId === member.userId && !(member.userId === user.id && item.isHiddenFromListOwner));
       const reserved = items.filter((item) => item.reservedById !== null && (item.reservationMode !== "HELP" || item._count.contributions >= (item.helpersNeeded ?? 0))).length;
@@ -47,11 +52,15 @@ export default async function EventDashboard({ params, searchParams }: { params:
       const hideProgress = viewerCannotSee || (event.hideReservationFromOwner && member.userId === user.id);
       return <Link href={`/events/${eventId}/members/${member.userId}`} key={member.id} className={`card member-card${isEmpty ? " empty" : ""}`}>
         <div><div className="member-name">{member.user.name}{member.userId === user.id ? ` (${t("tu")})` : ""}</div>{member.user.isManagedProfile && <span className="member-badge">{t("Perfil familiar")}</span>}</div>
-        {viewerCannotSee ? <span className="member-badge">{t("Accés limitat")}</span> : !hideProgress && <span className="progress">{reserved}/{items.length} {t("agafats")}</span>}
+        {viewerCannotSee ? <span className="member-badge">{t("Accés limitat")}</span> : !hideProgress && <span className="progress">{reserved}/{items.length} {t("reservats")}</span>}
       </Link>;
-    })}</div>
-    {event.listMode === "SINGLE_LIST" && <div className="section-heading" style={{ marginTop: 36 }}><h2>{t("Participants")}</h2></div>}
-    {event.listMode === "SINGLE_LIST" && <div className="card card-pad">{event.members.map((member) => <div className="member-setting" key={member.id}><span className="member-name">{member.user.name}{member.userId === user.id ? ` (${t("tu")})` : ""}</span></div>)}</div>}
+    })}</div>}
+    {event.listMode === "SINGLE_LIST" && <div className="section-heading participants-heading"><h2>{t("Participants")}</h2><span className="muted small">{event.members.length} {event.members.length === 1 ? t("persona") : t("persones")}</span></div>}
+    {event.listMode === "SINGLE_LIST" && <ul className="participant-chips">{event.members.map((member) => <li key={member.id} className={member.userId === event.primaryListOwnerId ? "list-owner" : undefined}>
+      <span className="participant-avatar" aria-hidden>{member.user.name.trim().charAt(0).toUpperCase()}</span>
+      <span>{member.user.name}{member.userId === user.id ? ` (${t("tu")})` : ""}</span>
+      {member.userId === event.primaryListOwnerId && <span className="member-badge">🎁 {t("La llista és seva")}</span>}
+    </li>)}</ul>}
     {membership.role !== "OWNER" && event.primaryListOwnerId === user.id && <p className="privacy-note event-leave-note">{t("Abans d’abandonar, demana al propietari que designi una altra persona per a la llista principal.")}</p>}
     {membership.role !== "OWNER" && responsibleProfileCount > 0 && <p className="privacy-note event-leave-note">{t("Abans d’abandonar, reassigna els perfils familiars que gestiones.")}</p>}
     {membership.role !== "OWNER" && event.primaryListOwnerId !== user.id && responsibleProfileCount === 0 && <div className="event-leave"><LeaveEventButton eventId={eventId} /></div>}
