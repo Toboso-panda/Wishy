@@ -44,14 +44,30 @@ export async function requireItemEditor(eventId: string, listOwnerId: string, it
   const access = await listAccess(eventId, listOwnerId);
   if (!itemId) {
     if (!access.canCreate) redirect(`/events/${eventId}/members/${listOwnerId}?error=${encodeURIComponent("No tens permisos per afegir regals a aquesta llista.")}`);
-    return { ...access, hideNewItemFromOwner: !access.ownList && Boolean(access.responsibility || access.responsibleForAll) };
+    return { ...access, hideNewItemFromOwner: !access.ownList && Boolean(access.responsibility || access.responsibleForAll), entry: null, canEditContent: true };
   }
-  const item = await prisma.item.findFirst({ where: { id: itemId, eventId, listOwnerId } });
-  if (!item) notFound();
+  const entry = await prisma.eventItem.findFirst({
+    where: { eventId, itemId, item: { ownerId: listOwnerId } },
+    include: { item: { include: { _count: { select: { listEntries: true, eventEntries: true } } } } },
+  });
+  if (!entry) notFound();
+  const { item } = entry;
   const hiddenFromSelf = access.ownList && item.isHiddenFromListOwner;
   const canEdit = !hiddenFromSelf && (access.canEditAll || (access.canEditOwnHidden && item.createdBy === access.user.id && item.isHiddenFromListOwner));
   if (!canEdit) redirect(`/events/${eventId}/members/${listOwnerId}?error=${encodeURIComponent("No tens permisos per modificar aquest regal.")}`);
-  return { ...access, hideNewItemFromOwner: false };
+  // The gift's content (name, photo...) is shared by every list and event it is in.
+  // Only its owner, or whoever added it as a surprise, may change it once it is shared.
+  const sharedElsewhere = item._count.listEntries > 0 || item._count.eventEntries > 1;
+  const canEditContent = access.ownList || (item.isHiddenFromListOwner && item.createdBy === access.user.id) || !sharedElsewhere;
+  return { ...access, hideNewItemFromOwner: false, entry, canEditContent };
+}
+
+// Lists are personal: only their owner sees and changes them.
+export async function requireOwnList(listId: string) {
+  const user = await requireUser();
+  const list = await prisma.wishList.findUnique({ where: { id: listId } });
+  if (!list || list.ownerId !== user.id) notFound();
+  return { user, list };
 }
 
 export async function canCreateManagedProfile(eventId: string, userId: string) {

@@ -78,3 +78,7 @@
   .name { display: none; }
   .trigger { padding-right: 8px; }
 }
+
+/* "Les meves llistes" link (the logout button keeps the red style) */
+.item[href] { color: var(--pine); text-decoration: none; }
+.item[href]:hover { background: #e3efe5; }

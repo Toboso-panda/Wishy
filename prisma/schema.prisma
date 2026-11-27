@@ -31,51 +31,53 @@ enum ReservationMode {
 }
 
 model User {
-  id                 String             @id @default(cuid())
-  name               String
-  email              String?            @unique
-  passwordHash       String?
-  isManagedProfile   Boolean            @default(false)
-  profileClaimToken  String?            @unique
-  createdAt          DateTime           @default(now())
-  memberships        EventMember[]
-  ownedEvents        Event[]            @relation("EventOwner")
-  primaryListEvents  Event[]            @relation("EventPrimaryListOwner")
-  listItems          Item[]             @relation("ItemListOwner")
-  createdItems       Item[]             @relation("ItemCreatedBy")
-  reservedItems      Item[]             @relation("ItemReservedBy")
-  contributions      ItemContribution[]
+  id                  String                  @id @default(cuid())
+  name                String
+  email               String?                 @unique
+  passwordHash        String?
+  isManagedProfile    Boolean                 @default(false)
+  profileClaimToken   String?                 @unique
+  createdAt           DateTime                @default(now())
+  memberships         EventMember[]
+  ownedEvents         Event[]                 @relation("EventOwner")
+  primaryListEvents   Event[]                 @relation("EventPrimaryListOwner")
+  items               Item[]                  @relation("ItemOwner")
+  createdItems        Item[]                  @relation("ItemCreatedBy")
+  reservedItems       EventItem[]             @relation("EventItemReservedBy")
+  wishLists           WishList[]
+  contributions       ItemContribution[]
   responsibleProfiles ProfileResponsibility[] @relation("ProfileResponsible")
-  responsibilities   ProfileResponsibility[] @relation("ResponsibleProfile")
+  responsibilities    ProfileResponsibility[] @relation("ResponsibleProfile")
 }
 
 model Event {
-  id                 String      @id @default(cuid())
-  name               String
-  description        String?
-  date               DateTime?
-  listMode           ListMode    @default(EVERY_MEMBER_LIST)
-  hideReservationFromOwner Boolean @default(true)
-  primaryListOwnerId String?
-  inviteToken        String      @unique @default(cuid())
-  ownerId            String
-  createdAt          DateTime    @default(now())
-  owner              User        @relation("EventOwner", fields: [ownerId], references: [id])
-  primaryListOwner   User?       @relation("EventPrimaryListOwner", fields: [primaryListOwnerId], references: [id], onDelete: SetNull)
-  members            EventMember[]
-  items              Item[]
-  responsibilities   ProfileResponsibility[]
+  id                       String                  @id @default(cuid())
+  name                     String
+  description              String?
+  date                     DateTime?
+  listMode                 ListMode                @default(EVERY_MEMBER_LIST)
+  hideReservationFromOwner Boolean                 @default(true)
+  primaryListOwnerId       String?
+  inviteToken              String                  @unique @default(cuid())
+  ownerId                  String
+  createdAt                DateTime                @default(now())
+  owner                    User                    @relation("EventOwner", fields: [ownerId], references: [id])
+  primaryListOwner         User?                   @relation("EventPrimaryListOwner", fields: [primaryListOwnerId], references: [id], onDelete: SetNull)
+  members                  EventMember[]
+  items                    EventItem[]
+  responsibilities         ProfileResponsibility[]
 }
 
 model EventMember {
-  id       String   @id @default(cuid())
-  eventId  String
-  userId   String
-  role     Role     @default(MEMBER)
-  joinedAt DateTime @default(now())
-  managesAllLists Boolean @default(false)
-  event    Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id              String   @id @default(cuid())
+  eventId         String
+  userId          String
+  role            Role     @default(MEMBER)
+  joinedAt        DateTime @default(now())
+  managesAllLists Boolean  @default(false)
+  event           Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@unique([eventId, userId])
   @@index([eventId])
 }
@@ -90,48 +92,93 @@ model ProfileResponsibility {
   event             Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
   profile           User     @relation("ProfileResponsible", fields: [profileUserId], references: [id], onDelete: Cascade)
   responsible       User     @relation("ResponsibleProfile", fields: [responsibleUserId], references: [id], onDelete: Cascade)
+
   @@unique([eventId, profileUserId, responsibleUserId])
   @@index([eventId, responsibleUserId])
 }
 
+// A gift: something a person (owner) wants. It belongs to the person, not to an event:
+// the same gift can be in several of their lists (ListItem) and in several events (EventItem).
 model Item {
-  id              String           @id @default(cuid())
+  id                    String      @id @default(cuid())
+  ownerId               String
+  name                  String
+  description           String?
+  url                   String?
+  imagePath             String?
+  price                 String?
+  priority              Priority?
+  category              String?
+  notes                 String?
+  // A surprise added by someone else: the owner never sees it
+  isHiddenFromListOwner Boolean     @default(false)
+  createdBy             String
+  createdAt             DateTime    @default(now())
+  updatedAt             DateTime    @updatedAt
+  owner                 User        @relation("ItemOwner", fields: [ownerId], references: [id])
+  createdByUser         User        @relation("ItemCreatedBy", fields: [createdBy], references: [id])
+  listEntries           ListItem[]
+  eventEntries          EventItem[]
+
+  @@index([ownerId])
+}
+
+// A person's own list of gifts, independent of any event
+model WishList {
+  id        String     @id @default(cuid())
+  ownerId   String
+  name      String
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  owner     User       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  items     ListItem[]
+
+  @@index([ownerId])
+}
+
+model ListItem {
+  listId    String
+  itemId    String
+  sortOrder Int      @default(0)
+  addedAt   DateTime @default(now())
+  list      WishList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@id([listId, itemId])
+  @@index([itemId])
+}
+
+// A gift shown in an event (in its owner's display). Order, active, essential and the
+// reservation belong to the event: the same gift can be reserved in one event and not in another.
+model EventItem {
+  id              String             @id @default(cuid())
   eventId         String
-  listOwnerId     String
-  name            String
-  description     String?
-  url             String?
-  imagePath       String?
-  price           String?
-  priority        Priority?
-  category        String?
-  notes           String?
-  isActive        Boolean          @default(true)
-  isEssential     Boolean          @default(false)
-  isHiddenFromListOwner Boolean    @default(false)
-  sortOrder       Int              @default(0)
-  reservationMode ReservationMode  @default(NONE)
+  itemId          String
+  sortOrder       Int                @default(0)
+  isActive        Boolean            @default(true)
+  isEssential     Boolean            @default(false)
+  reservationMode ReservationMode    @default(NONE)
   helpersNeeded   Int?
   reservedById    String?
   reservedAt      DateTime?
-  createdBy       String
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  event           Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  listOwner       User             @relation("ItemListOwner", fields: [listOwnerId], references: [id])
-  reservedBy      User?            @relation("ItemReservedBy", fields: [reservedById], references: [id], onDelete: SetNull)
-  createdByUser   User             @relation("ItemCreatedBy", fields: [createdBy], references: [id])
+  addedAt         DateTime           @default(now())
+  event           Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  item            Item               @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  reservedBy      User?              @relation("EventItemReservedBy", fields: [reservedById], references: [id], onDelete: SetNull)
   contributions   ItemContribution[]
-  @@index([eventId, listOwnerId, isActive])
+
+  @@unique([eventId, itemId])
+  @@index([itemId])
 }
 
 model ItemContribution {
-  id        String   @id @default(cuid())
-  itemId    String
-  userId    String
-  note      String?
-  createdAt DateTime @default(now())
-  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  @@unique([itemId, userId])
+  id          String    @id @default(cuid())
+  eventItemId String
+  userId      String
+  note        String?
+  createdAt   DateTime  @default(now())
+  eventItem   EventItem @relation(fields: [eventItemId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([eventItemId, userId])
 }

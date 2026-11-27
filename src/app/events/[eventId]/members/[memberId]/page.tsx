@@ -4,7 +4,7 @@ import { GiftList } from "@/components/lists/gift-list";
 import { prisma } from "@/lib/db";
 import { getLocale } from "@/lib/i18n";
 
-export default async function MemberList({ params, searchParams }: { params: Promise<{ eventId: string; memberId: string }>; searchParams: Promise<{ error?: string; saved?: string; cleared?: string }> }) {
+export default async function MemberList({ params, searchParams }: { params: Promise<{ eventId: string; memberId: string }>; searchParams: Promise<{ error?: string; saved?: string; cleared?: string; added?: string }> }) {
   const { eventId, memberId } = await params;
   const flags = await searchParams;
   const locale = await getLocale();

@@ -1,72 +1,120 @@
 "use client";
 
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
-import type { Prisma } from "@prisma/client";
-import { ArrowDown, ArrowUp, Check, ExternalLink, Eye, EyeOff, Gift, Lock, Pencil, Star, Trash2, Users } from "lucide-react";
+import type { Item, Prisma } from "@prisma/client";
+import { ArrowDown, ArrowUp, Check, ExternalLink, Eye, EyeOff, Gift, Lock, Pencil, Star, Trash2, Users, X } from "lucide-react";
 import { addContribution, changeReservationMode, deleteItem, moveItem, removeContribution, reserveItem, toggleItemActive, toggleItemEssential, unreserveItem } from "@/app/actions";
 import { useLocale } from "@/components/i18n/locale-provider";
 
-type ItemWithPeople = Prisma.ItemGetPayload<{
-  include: { reservedBy: { select: { id: true; name: true } }; contributions: { include: { user: { select: { id: true; name: true } } } } }
+type EntryWithPeople = Prisma.EventItemGetPayload<{
+  include: { item: true; reservedBy: { select: { id: true; name: true } }; contributions: { include: { user: { select: { id: true; name: true } } } } }
 }>;
 
+// Top of every gift card: square photo + text with a fixed height ("Veure més" opens the rest).
+// Used in events (ItemCard) and in personal lists (ListGiftCard).
+export function GiftCardShell({ gift, tags, className = "", dimmed = false, children }: {
+  gift: Item; tags?: ReactNode; className?: string; dimmed?: boolean; children?: ReactNode;
+}) {
+  const { t } = useLocale();
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+
+  // The text area has a fixed height (christmas.css): show "Veure més" only when something is cut off
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content || expanded) return;
+    const check = () => setOverflows(content.scrollHeight > content.clientHeight + 1
+      || [...content.querySelectorAll<HTMLElement>(".item-title, .item-description, .item-detail")].some((el) => el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1));
+    check();
+    const observer = new ResizeObserver(check);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [expanded, gift.name, gift.description, gift.notes, gift.category, gift.priority, gift.url, gift.price]);
+
+  return <article className={`card item-card${expanded ? " expanded" : ""}${className ? ` ${className}` : ""}`} style={dimmed ? { opacity: .7 } : undefined}>
+    {gift.imagePath ? <img className="item-image" src={gift.imagePath} alt={`${t("Imatge de")} ${gift.name}`} /> : <div className="item-image-placeholder" aria-hidden>🎁</div>}
+    <div className="item-content" ref={contentRef}>
+      <div className="item-heading-row">
+        <div className="item-title-group">
+          <h2 className="item-title">{gift.name}</h2>
+          {tags && <div className="item-tags">{tags}</div>}
+        </div>
+        {gift.price && <strong className="item-price">{gift.price}</strong>}
+      </div>
+      {gift.description && <p className="item-description">{gift.description}</p>}
+      {(gift.category || gift.priority) && <p className="item-detail">{[gift.category, gift.priority && `${t("Prioritat")} ${gift.priority === "HIGH" ? t("alta") : gift.priority === "MEDIUM" ? t("mitjana") : t("baixa")}`].filter(Boolean).join(" · ")}</p>}
+      {gift.notes && <p className="item-detail">{t("Nota:")} {gift.notes}</p>}
+      {gift.url && <a className="item-link" href={gift.url} target="_blank" rel="noopener noreferrer"><ExternalLink size={15} aria-hidden /> {t("Veure on comprar-lo")}</a>}
+      {(overflows || expanded) && <button className="item-more" type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? t("Veure menys") : t("Veure més")}</button>}
+    </div>
+    {children}
+  </article>;
+}
+
 type Props = {
-  item: ItemWithPeople; eventId: string; currentUserId: string; canEdit: boolean; canModerateReservations: boolean; hideReservationDetails: boolean; first: boolean; last: boolean;
+  entry: EntryWithPeople; currentUserId: string; canEdit: boolean; canModerateReservations: boolean; hideReservationDetails: boolean; first: boolean; last: boolean;
+  /** Someone reserved this same gift in another event: it can't be reserved here */
+  reservedElsewhere: boolean;
+  /** The gift is also in a list or another event: the bin only takes it out of this event */
+  sharedElsewhere: boolean;
 };
 
-export function ItemCard({ item, eventId, currentUserId, canEdit, canModerateReservations, hideReservationDetails, first, last }: Props) {
+// A gift in an event: shared content + this event's state (active, essential, reservation)
+export function ItemCard({ entry, currentUserId, canEdit, canModerateReservations, hideReservationDetails, first, last, reservedElsewhere, sharedElsewhere }: Props) {
   const { t } = useLocale();
-  const ids = <><input type="hidden" name="eventId" value={eventId} /><input type="hidden" name="itemId" value={item.id} /></>;
-  const isRecipient = item.listOwnerId === currentUserId;
-  const isGroup = item.reservationMode !== "NONE";
-  const participantCount = item.reservedById ? 1 + item.contributions.length : 0;
-  const groupTarget = item.reservationMode === "HELP" ? 1 + (item.helpersNeeded ?? 0) : null;
+  const { item } = entry;
+  const ids = <><input type="hidden" name="eventId" value={entry.eventId} /><input type="hidden" name="itemId" value={item.id} /></>;
+  const isRecipient = item.ownerId === currentUserId;
+  const isGroup = entry.reservationMode !== "NONE";
+  const participantCount = entry.reservedById ? 1 + entry.contributions.length : 0;
+  const groupTarget = entry.reservationMode === "HELP" ? 1 + (entry.helpersNeeded ?? 0) : null;
   const groupComplete = groupTarget !== null && participantCount >= groupTarget;
+  const blockedElsewhere = reservedElsewhere && !entry.reservedById && !hideReservationDetails;
 
-  const status = !item.isActive ? { className: "inactive", label: t("Inactiu") }
-    : !item.reservedById ? { className: "available", label: t("Disponible") }
+  const status = !entry.isActive ? { className: "inactive", label: t("Inactiu") }
+    : blockedElsewhere ? { className: "elsewhere", label: t("Ja reservat") }
+    : !entry.reservedById ? { className: "available", label: t("Disponible") }
     : isGroup && !groupComplete ? { className: "help", label: groupTarget ? `${t("En grup")} · ${participantCount}/${groupTarget}` : `${t("En grup")} · ${participantCount}` }
     : { className: "reserved", label: t("Reservat") };
 
-  return <article className="card item-card" style={!item.isActive ? { opacity: .7 } : undefined}>
-    {item.imagePath ? <img className="item-image" src={item.imagePath} alt={`${t("Imatge de")} ${item.name}`} /> : <div className="item-image-placeholder" aria-hidden>🎁</div>}
-    <div className="item-content">
-      <div className="item-heading-row">
-        <div className="item-title-group">
-          <h2 className="item-title">{item.name}</h2>
-          <div className="item-tags">
-            {!hideReservationDetails && <span className={`status-badge ${status.className}`}>{status.label}</span>}
-            {hideReservationDetails && !item.isActive && <span className="status-badge inactive">{t("Inactiu")}</span>}
-            {item.isEssential && <span className="essential-label"><Star size={13} fill="currentColor" aria-hidden /> {t("Imprescindible")}</span>}
-            {item.isHiddenFromListOwner && !isRecipient && <span className="member-badge" title={t("La persona de la llista no veu aquest regal.")}><Lock size={12} aria-hidden /> {t("Sorpresa")}</span>}
-          </div>
-        </div>
-        {item.price && <strong className="item-price">{item.price}</strong>}
-      </div>
-      {item.description && <p className="item-description">{item.description}</p>}
-      {(item.category || item.priority) && <p className="item-detail">{[item.category, item.priority && `${t("Prioritat")} ${item.priority === "HIGH" ? t("alta") : item.priority === "MEDIUM" ? t("mitjana") : t("baixa")}`].filter(Boolean).join(" · ")}</p>}
-      {item.notes && <p className="item-detail">{t("Nota:")} {item.notes}</p>}
-      {item.url && <a className="item-link" href={item.url} target="_blank" rel="noopener noreferrer"><ExternalLink size={15} aria-hidden /> {t("Veure on comprar-lo")}</a>}
-      {!hideReservationDetails && <ReservationPanel {...{ item, ids, isRecipient, currentUserId, canModerateReservations, participantCount, groupTarget, groupComplete }} />}
-    </div>
+  const tags = <>
+    {!hideReservationDetails && <span className={`status-badge ${status.className}`}>{blockedElsewhere && <Lock size={12} aria-hidden />} {status.label}</span>}
+    {hideReservationDetails && !entry.isActive && <span className="status-badge inactive">{t("Inactiu")}</span>}
+    {entry.isEssential && <span className="essential-label"><Star size={13} fill="currentColor" aria-hidden /> {t("Imprescindible")}</span>}
+    {item.isHiddenFromListOwner && !isRecipient && <span className="member-badge" title={t("La persona de la llista no veu aquest regal.")}><Lock size={12} aria-hidden /> {t("Sorpresa")}</span>}
+  </>;
+
+  const removeQuestion = sharedElsewhere
+    ? t("Vols treure aquest regal d’aquest esdeveniment? Continuarà a les llistes i altres esdeveniments on és.")
+    : t("Vols esborrar aquest regal? Aquesta acció no es pot desfer.");
+
+  return <GiftCardShell gift={item} tags={tags} dimmed={!entry.isActive} className={blockedElsewhere ? "reserved-elsewhere" : ""}>
+    {blockedElsewhere
+      ? <section className="reserve-panel elsewhere" role="status">
+          <p className="reserve-title"><Lock size={18} aria-hidden /> {t("Ja està reservat en un altre esdeveniment")}</p>
+          <p className="reserve-subtitle">{t("Algú ja ha reservat aquest mateix regal en un altre esdeveniment. No el compris: quedaria repetit.")}</p>
+        </section>
+      : !hideReservationDetails && <ReservationPanel {...{ entry, ids, isRecipient, currentUserId, canModerateReservations, participantCount, groupTarget, groupComplete }} />}
     {canEdit && <footer className="item-editbar">
       <div className="item-editbar-group" aria-label={t("Canviar l’ordre del regal")}>
         <form action={moveItem}>{ids}<input type="hidden" name="direction" value="up" /><button className="editbar-button icon-only" type="submit" disabled={first} aria-label={t("Pujar regal")} title={t("Pujar")}><ArrowUp size={17} /></button></form>
         <form action={moveItem}>{ids}<input type="hidden" name="direction" value="down" /><button className="editbar-button icon-only" type="submit" disabled={last} aria-label={t("Baixar regal")} title={t("Baixar")}><ArrowDown size={17} /></button></form>
       </div>
       <div className="item-editbar-group">
-        <form action={toggleItemEssential}>{ids}<button className={`editbar-button${item.isEssential ? " selected" : ""}`} type="submit" aria-pressed={item.isEssential}><Star size={16} fill={item.isEssential ? "currentColor" : "none"} aria-hidden /> {t("Imprescindible")}</button></form>
-        <Link className="editbar-button" href={`/events/${eventId}/members/${item.listOwnerId}/items/${item.id}/edit`}><Pencil size={16} aria-hidden /> {t("Editar")}</Link>
-        <form action={toggleItemActive}>{ids}<button className="editbar-button" type="submit" title={item.isActive ? t("Amaga el regal sense esborrar-lo") : undefined}>{item.isActive ? <><EyeOff size={16} aria-hidden /> {t("Desactivar")}</> : <><Eye size={16} aria-hidden /> {t("Activar")}</>}</button></form>
-        <form action={deleteItem} onSubmit={(event) => { if (!window.confirm(t("Vols esborrar aquest regal? Aquesta acció no es pot desfer."))) event.preventDefault(); }}>{ids}<button className="editbar-button danger" type="submit"><Trash2 size={16} aria-hidden /> {t("Esborrar")}</button></form>
+        <form action={toggleItemEssential}>{ids}<button className={`editbar-button${entry.isEssential ? " selected" : ""}`} type="submit" aria-pressed={entry.isEssential}><Star size={16} fill={entry.isEssential ? "currentColor" : "none"} aria-hidden /> {t("Imprescindible")}</button></form>
+        <Link className="editbar-button" href={`/events/${entry.eventId}/members/${item.ownerId}/items/${item.id}/edit`}><Pencil size={16} aria-hidden /> {t("Editar")}</Link>
+        <form action={toggleItemActive}>{ids}<button className="editbar-button" type="submit" title={entry.isActive ? t("Amaga el regal sense esborrar-lo") : undefined}>{entry.isActive ? <><EyeOff size={16} aria-hidden /> {t("Desactivar")}</> : <><Eye size={16} aria-hidden /> {t("Activar")}</>}</button></form>
+        <form action={deleteItem} onSubmit={(event) => { if (!window.confirm(removeQuestion)) event.preventDefault(); }}>{ids}<button className="editbar-button danger" type="submit">{sharedElsewhere ? <><X size={16} aria-hidden /> {t("Treure")}</> : <><Trash2 size={16} aria-hidden /> {t("Esborrar")}</>}</button></form>
       </div>
     </footer>}
-  </article>;
+  </GiftCardShell>;
 }
 
 // Who has the gift and what the current person can do about it.
-function ReservationPanel({ item, ids, isRecipient, currentUserId, canModerateReservations, participantCount, groupTarget, groupComplete }: {
-  item: ItemWithPeople; ids: React.ReactNode; isRecipient: boolean; currentUserId: string; canModerateReservations: boolean; participantCount: number; groupTarget: number | null; groupComplete: boolean;
+function ReservationPanel({ entry: item, ids, isRecipient, currentUserId, canModerateReservations, participantCount, groupTarget, groupComplete }: {
+  entry: EntryWithPeople; ids: React.ReactNode; isRecipient: boolean; currentUserId: string; canModerateReservations: boolean; participantCount: number; groupTarget: number | null; groupComplete: boolean;
 }) {
   const { t } = useLocale();
   const isOrganizer = item.reservedById === currentUserId;

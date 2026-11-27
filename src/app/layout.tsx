@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Fraunces, Nunito } from "next/font/google";
 import "./globals.css";
 import "./christmas.css";
@@ -12,6 +12,10 @@ import { SiteFooter } from "@/components/layout/site-footer";
 // Headings: a soft, rounded serif. Body: a friendly rounded sans-serif.
 const headingFont = Fraunces({ subsets: ["latin"], axes: ["SOFT", "opsz"], variable: "--font-fraunces", display: "swap" });
 const bodyFont = Nunito({ subsets: ["latin"], variable: "--font-nunito", display: "swap" });
+
+// Wishy only has a light theme. Saying so stops phone browsers in night mode from darkening
+// the page on their own (they turned the white snow black).
+export const viewport: Viewport = { colorScheme: "only light" };
 
 export async function generateMetadata(): Promise<Metadata> {
   const locale = await getLocale();
