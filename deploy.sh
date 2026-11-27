@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Actualitza Wishy al NAS amb l'última imatge que ha construït GitHub Actions.
-# Primer fes push i espera que el workflow "Docker image" acabi en verd.
+# Primer cal que el PR s'accepti a main de Toboso-panda/Wishy i que el workflow
+# "Docker image" d'aquell repositori acabi en verd.
 #
 # Al NAS, Wishy és dins del compose compartit /root/docker-stack/docker-compose.yml
 # (amb els secrets), així que aquí no es copia cap fitxer: només es baixa la imatge
@@ -10,10 +11,10 @@ set -euo pipefail
 
 NAS="${NAS:-root@buggyhs}"
 STACK=/root/docker-stack
-IMAGE=ghcr.io/claraynlopez/wishy
+IMAGE=ghcr.io/toboso-panda/wishy
 
 # Les imatges d'aquest repositori porten aquesta etiqueta; només s'esborren aquestes
-LABEL="org.opencontainers.image.source=https://github.com/claraynlopez/Wishy"
+LABEL="org.opencontainers.image.source=https://github.com/Toboso-panda/Wishy"
 
 ssh "$NAS" bash -s <<EOF
 set -euo pipefail

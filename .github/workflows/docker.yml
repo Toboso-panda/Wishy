@@ -1,10 +1,11 @@
-# Construeix la imatge de Wishy a cada push a updates-clara i la publica a
-# GitHub Container Registry (privada). El NAS només la baixa (./deploy.sh).
+# Construeix la imatge de Wishy a cada push (o PR acceptat) a main de Toboso-panda/Wishy
+# i la publica a GitHub Container Registry (privada). El NAS només la baixa (./deploy.sh).
+# Als forks no s'executa: la imatge només surt del repositori principal.
 name: Docker image
 
 on:
   push:
-    branches: [updates-clara]
+    branches: [main]
   workflow_dispatch: # botó "Run workflow" a la pestanya Actions
 
 permissions:
@@ -17,6 +18,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.repository == 'Toboso-panda/Wishy'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +35,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/wishy
+          images: ghcr.io/toboso-panda/wishy # en minúscules, com exigeix Docker
           tags: |
             type=raw,value=latest
             type=sha
