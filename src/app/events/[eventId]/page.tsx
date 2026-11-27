@@ -9,15 +9,15 @@ import { canCreateManagedProfile, requireMembership, isManager } from "@/lib/per
 import { getLocale } from "@/lib/i18n";
 import { translate } from "@/lib/i18n/dictionary";
 
-export default async function EventDashboard({ params, searchParams }: { params: Promise<{ eventId: string }>; searchParams: Promise<{ error?: string; removed?: string; saved?: string; cleared?: string }> }) {
+export default async function EventDashboard({ params, searchParams }: { params: Promise<{ eventId: string }>; searchParams: Promise<{ error?: string; removed?: string; saved?: string; cleared?: string; added?: string }> }) {
   const { eventId } = await params;
-  const [{ error, removed, saved, cleared }, { user, membership }] = await Promise.all([searchParams, requireMembership(eventId)]);
+  const [{ error, removed, saved, cleared, added }, { user, membership }] = await Promise.all([searchParams, requireMembership(eventId)]);
   const locale = await getLocale();
   const t = (s: string) => translate(locale, s);
   const event = await prisma.event.findUnique({ where: { id: eventId }, include: {
     members: { include: { user: true }, orderBy: { joinedAt: "asc" } },
     primaryListOwner: { select: { name: true } },
-    items: { where: { isActive: true }, select: { listOwnerId: true, reservedById: true, reservationMode: true, helpersNeeded: true, isHiddenFromListOwner: true, _count: { select: { contributions: true } } } },
+    items: { where: { isActive: true }, select: { reservedById: true, reservationMode: true, helpersNeeded: true, item: { select: { ownerId: true, isHiddenFromListOwner: true } }, _count: { select: { contributions: true } } } },
   } });
   if (!event) notFound();
   const canManage = isManager(membership.role);
@@ -40,13 +40,13 @@ export default async function EventDashboard({ params, searchParams }: { params:
     {error && <p className="alert" style={{ marginTop: 16 }}>{t(error)}</p>}
     {removed && <p className="success-note" style={{ marginTop: 16 }}>{t("S’ha eliminat de l’esdeveniment.")}</p>}
     {event.listMode === "SINGLE_LIST" && (event.primaryListOwnerId
-      ? <GiftList eventId={eventId} memberId={event.primaryListOwnerId} locale={locale} variant="embedded" flags={{ saved, cleared }} />
+      ? <GiftList eventId={eventId} memberId={event.primaryListOwnerId} locale={locale} variant="embedded" flags={{ saved, cleared, added }} />
       : <div className="empty-state"><h3>{t("Encara no hi ha ningú assignat a la llista")}</h3><p className="small">{t("El propietari pot triar de qui és la llista a la configuració.")}</p></div>)}
     {event.listMode === "EVERY_MEMBER_LIST" && <div className="section-heading"><h2>{t("Llistes de membres")}</h2><span className="muted small">{t("Tria una llista per veure els regals")}</span></div>}
     {canCreateProfile && event.listMode === "EVERY_MEMBER_LIST" && <details className="profile-create-details"><summary>＋ {t("Afegir perfil familiar")}</summary><form action={createManagedProfile} className="profile-create-form"><input type="hidden" name="eventId" value={eventId} /><label htmlFor="managed-profile-name">{t("Nom del perfil familiar")}</label><input id="managed-profile-name" name="name" required maxLength={60} placeholder={t("Per exemple, Nil")} /><span className="field-help">{t("El perfil no necessita correu ni contrasenya. Podrà activar un compte més endavant.")}</span><button className="button button-primary" type="submit">{t("Crear perfil")}</button></form></details>}
     {event.listMode === "EVERY_MEMBER_LIST" && <div className="member-grid">{visibleMembers.map((member) => {
       const viewerCannotSee = cannotViewProfileIds.has(member.userId) && member.userId !== user.id;
-      const items = event.items.filter((item) => item.listOwnerId === member.userId && !(member.userId === user.id && item.isHiddenFromListOwner));
+      const items = event.items.filter((entry) => entry.item.ownerId === member.userId && !(member.userId === user.id && entry.item.isHiddenFromListOwner));
       const reserved = items.filter((item) => item.reservedById !== null && (item.reservationMode !== "HELP" || item._count.contributions >= (item.helpersNeeded ?? 0))).length;
       const isEmpty = !viewerCannotSee && items.length === 0;
       const hideProgress = viewerCannotSee || (event.hideReservationFromOwner && member.userId === user.id);

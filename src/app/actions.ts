@@ -6,19 +6,21 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/db";
 import { clearSession, createSession, currentUser } from "@/lib/session";
-import { canCreateManagedProfile, isManager, listAccess, requireItemEditor, requireMembership, requireUser } from "@/lib/permissions";
+import { canCreateManagedProfile, isManager, listAccess, requireItemEditor, requireMembership, requireOwnList, requireUser } from "@/lib/permissions";
 import { hashPassword, verifyPassword } from "@/lib/password";
-import { removeImage, saveImage } from "@/lib/uploads";
+import { saveImage } from "@/lib/uploads";
+import { deleteAllItemsOf, deleteOrphanItems, removeEventEntries, removeImages } from "@/lib/gifts";
 
 const text = (data: FormData, key: string) => String(data.get(key) ?? "").trim();
 const optional = (value: string) => value || null;
 const fail = (path: string, message: string): never => redirect(`${path}${path.includes("?") ? "&" : "?"}error=${encodeURIComponent(message)}`);
 const eventPath = (id: string) => `/events/${id}`;
 const listPath = (eventId: string, userId: string) => `${eventPath(eventId)}/members/${userId}`;
+const myListPath = (listId: string) => `/lists/${listId}`;
 
-async function canModerateItemReservations(eventId: string, item: { listOwnerId: string; createdBy: string; isHiddenFromListOwner: boolean }, userId: string) {
-  if (item.listOwnerId === userId) return false;
-  const access = await listAccess(eventId, item.listOwnerId);
+async function canModerateItemReservations(eventId: string, item: { ownerId: string; createdBy: string; isHiddenFromListOwner: boolean }, userId: string) {
+  if (item.ownerId === userId) return false;
+  const access = await listAccess(eventId, item.ownerId);
   return access.owner || access.canEditAll || (access.canEditOwnHidden && item.createdBy === userId && item.isHiddenFromListOwner);
 }
 
@@ -130,7 +132,9 @@ export async function updateEvent(data: FormData) {
   redirect(`${eventPath(eventId)}/settings?saved=1`);
 }
 
-// Only the owner can delete an event. Everything in it goes too: lists, gifts, photos and family profiles.
+// Only the owner can delete an event. Its reservations go, and so do family profiles (they only
+// exist inside the event). People's gifts stay in their personal lists; gifts that were only
+// in this event are deleted with their photos.
 export async function deleteEvent(data: FormData) {
   const eventId = text(data, "eventId");
   const confirmation = text(data, "confirmName");
@@ -139,14 +143,18 @@ export async function deleteEvent(data: FormData) {
   if (membership.role !== "OWNER" || event.ownerId !== membership.userId) fail(settings, "Només el propietari pot eliminar l’esdeveniment.");
   if (confirmation !== event.name) fail(settings, "Escriu el nom de l’esdeveniment exactament per confirmar-ho.");
   const images = await prisma.$transaction(async (tx) => {
-    const items = await tx.item.findMany({ where: { eventId }, select: { imagePath: true } });
+    const photos = await removeEventEntries(tx, { eventId });
     const profiles = await tx.eventMember.findMany({ where: { eventId, user: { isManagedProfile: true } }, select: { userId: true } });
     await tx.event.delete({ where: { id: eventId } });
     // Family profiles without an account only exist inside this event
-    if (profiles.length) await tx.user.deleteMany({ where: { id: { in: profiles.map((p) => p.userId) }, isManagedProfile: true, memberships: { none: {} } } });
-    return items.map((item) => item.imagePath);
+    const orphanProfiles = profiles.length ? await tx.user.findMany({ where: { id: { in: profiles.map((p) => p.userId) }, isManagedProfile: true, memberships: { none: {} } }, select: { id: true } }) : [];
+    for (const profile of orphanProfiles) {
+      photos.push(...await deleteAllItemsOf(tx, profile.id));
+      await tx.user.delete({ where: { id: profile.id } });
+    }
+    return photos;
   });
-  await Promise.all(images.map(removeImage));
+  await removeImages(images);
   revalidatePath("/");
   redirect("/?deleted=1");
 }
@@ -250,21 +258,24 @@ export async function claimManagedProfile(data: FormData) {
 
 async function removeMemberFromEvent(eventId: string, userId: string) {
   const images = await prisma.$transaction(async (tx) => {
-    const ownedItems = await tx.item.findMany({ where: { eventId, listOwnerId: userId }, select: { imagePath: true } });
-    await tx.item.deleteMany({ where: { eventId, listOwnerId: userId } });
-    const reservations = await tx.item.findMany({ where: { eventId, reservedById: userId }, select: { id: true } });
+    // Their gifts leave this event (they stay in their personal lists)
+    const photos = await removeEventEntries(tx, { eventId, item: { ownerId: userId } });
+    const reservations = await tx.eventItem.findMany({ where: { eventId, reservedById: userId }, select: { id: true } });
     if (reservations.length) {
-      await tx.itemContribution.deleteMany({ where: { itemId: { in: reservations.map((item) => item.id) } } });
-      await tx.item.updateMany({ where: { eventId, reservedById: userId }, data: { reservedById: null, reservedAt: null, reservationMode: "NONE", helpersNeeded: null } });
+      await tx.itemContribution.deleteMany({ where: { eventItemId: { in: reservations.map((entry) => entry.id) } } });
+      await tx.eventItem.updateMany({ where: { eventId, reservedById: userId }, data: { reservedById: null, reservedAt: null, reservationMode: "NONE", helpersNeeded: null } });
     }
-    await tx.itemContribution.deleteMany({ where: { userId, item: { eventId } } });
+    await tx.itemContribution.deleteMany({ where: { userId, eventItem: { eventId } } });
     await tx.profileResponsibility.deleteMany({ where: { eventId, profileUserId: userId } });
     await tx.eventMember.delete({ where: { eventId_userId: { eventId, userId } } });
     const profile = await tx.user.findUnique({ where: { id: userId }, select: { isManagedProfile: true } });
-    if (profile?.isManagedProfile) await tx.user.delete({ where: { id: userId } });
-    return ownedItems.map((item) => item.imagePath);
+    if (profile?.isManagedProfile) {
+      photos.push(...await deleteAllItemsOf(tx, userId));
+      await tx.user.delete({ where: { id: userId } });
+    }
+    return photos;
   });
-  await Promise.all(images.map(removeImage));
+  await removeImages(images);
 }
 
 export async function removeEventMember(data: FormData) {
@@ -296,12 +307,9 @@ export async function clearMemberList(data: FormData) {
   const targetMember = await prisma.eventMember.findUnique({ where: { eventId_userId: { eventId, userId: targetUserId } } });
   if (!targetMember) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("Aquest membre ja no forma part de l’esdeveniment.")}`);
   if (membership.role === "ADMIN" && targetMember.role !== "MEMBER" && targetUserId !== membership.userId) fail(target, "Un administrador només pot buidar llistes de membres normals.");
-  const images = await prisma.$transaction(async (tx) => {
-    const items = await tx.item.findMany({ where: { eventId, listOwnerId: targetUserId }, select: { imagePath: true } });
-    await tx.item.deleteMany({ where: { eventId, listOwnerId: targetUserId } });
-    return items.map((item) => item.imagePath);
-  });
-  await Promise.all(images.map(removeImage));
+  // Takes every gift of this person out of the event; their personal lists are not touched
+  const images = await prisma.$transaction((tx) => removeEventEntries(tx, { eventId, item: { ownerId: targetUserId } }));
+  await removeImages(images);
   revalidatePath(eventPath(eventId));
   revalidatePath(target);
   redirect(`${target}?cleared=1`);
@@ -351,7 +359,12 @@ export async function changeMemberRole(data: FormData) {
   redirect(`${eventPath(eventId)}/settings?saved=1`);
 }
 
-function itemFields(data: FormData) {
+// ————— Gifts —————
+// A gift (Item) belongs to a person. It can be in several of their lists (ListItem) and in
+// several events (EventItem). Content is shared; order, active, essential and reservation are
+// per event.
+
+function giftFields(data: FormData) {
   const name = text(data, "name");
   if (!name || name.length > 120) throw new Error("El nom del regal és obligatori (màxim 120 caràcters).");
   const description = text(data, "description");
@@ -369,22 +382,52 @@ function itemFields(data: FormData) {
   return {
     name, description: optional(description), url: optional(url), price: optional(price),
     priority: priority ? priority as "LOW" | "MEDIUM" | "HIGH" : null,
-    category: optional(category), notes: optional(notes), isActive: data.get("isActive") === "on", isEssential: data.get("isEssential") === "on",
+    category: optional(category), notes: optional(notes),
   };
 }
 
+const eventFields = (data: FormData) => ({ isActive: data.get("isActive") === "on", isEssential: data.get("isEssential") === "on" });
+
+async function readGift(data: FormData, target: string) {
+  let fields: ReturnType<typeof giftFields> | undefined;
+  try { fields = giftFields(data); } catch (error) { fail(target, error instanceof Error ? error.message : "No s’ha pogut desar el regal."); }
+  let imagePath: string | undefined;
+  try { imagePath = await saveImage(data.get("image")); } catch (error) { fail(target, error instanceof Error ? error.message : "No s’ha pogut pujar la imatge."); }
+  return { fields: fields!, imagePath };
+}
+
+async function nextEventOrder(tx: Prisma.TransactionClient, eventId: string, ownerId: string) {
+  const last = await tx.eventItem.findFirst({ where: { eventId, item: { ownerId } }, orderBy: { sortOrder: "desc" }, select: { sortOrder: true } });
+  return (last?.sortOrder ?? -1) + 1;
+}
+
+async function nextListOrder(tx: Prisma.TransactionClient, listId: string) {
+  const last = await tx.listItem.findFirst({ where: { listId }, orderBy: { sortOrder: "desc" }, select: { sortOrder: true } });
+  return (last?.sortOrder ?? -1) + 1;
+}
+
+// A gift in an event, by event + gift id
+async function findEntry(eventId: string, itemId: string) {
+  const entry = await prisma.eventItem.findUnique({ where: { eventId_itemId: { eventId, itemId } }, include: { item: true } });
+  if (!entry) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
+  return entry;
+}
+
+// New gift straight into someone's display in an event (optionally also into one of my lists)
 export async function createItem(data: FormData) {
   const eventId = text(data, "eventId");
   const listOwnerId = text(data, "listOwnerId");
   const target = `${listPath(eventId, listOwnerId)}/items/new`;
-  const { user, event, hideNewItemFromOwner } = await requireItemEditor(eventId, listOwnerId);
-  let fields;
-  try { fields = itemFields(data); } catch (error) { fail(target, error instanceof Error ? error.message : "No s’ha pogut desar el regal."); }
-  let imagePath: string | undefined;
-  try { imagePath = await saveImage(data.get("image")); } catch (error) { fail(target, error instanceof Error ? error.message : "No s’ha pogut pujar la imatge."); }
-  const lastItem = await prisma.item.findFirst({ where: { eventId, listOwnerId }, orderBy: { sortOrder: "desc" }, select: { sortOrder: true } });
-  const sortOrder = (lastItem?.sortOrder ?? -1) + 1;
-  await prisma.item.create({ data: { ...fields!, eventId, listOwnerId, createdBy: user.id, sortOrder, imagePath: imagePath ?? null, isHiddenFromListOwner: hideNewItemFromOwner } });
+  const { user, hideNewItemFromOwner, ownList } = await requireItemEditor(eventId, listOwnerId);
+  const alsoListId = ownList ? text(data, "alsoListId") : "";
+  const alsoList = alsoListId ? await prisma.wishList.findFirst({ where: { id: alsoListId, ownerId: user.id } }) : null;
+  if (alsoListId && !alsoList) fail(target, "Aquesta llista no existeix.");
+  const { fields, imagePath } = await readGift(data, target);
+  await prisma.$transaction(async (tx) => {
+    const item = await tx.item.create({ data: { ...fields, imagePath: imagePath ?? null, ownerId: listOwnerId, createdBy: user.id, isHiddenFromListOwner: hideNewItemFromOwner } });
+    await tx.eventItem.create({ data: { eventId, itemId: item.id, sortOrder: await nextEventOrder(tx, eventId, listOwnerId), ...eventFields(data) } });
+    if (alsoList) await tx.listItem.create({ data: { listId: alsoList.id, itemId: item.id, sortOrder: await nextListOrder(tx, alsoList.id) } });
+  });
   revalidatePath(listPath(eventId, listOwnerId));
   redirect(listPath(eventId, listOwnerId));
 }
@@ -392,74 +435,73 @@ export async function createItem(data: FormData) {
 export async function updateItem(data: FormData) {
   const eventId = text(data, "eventId");
   const itemId = text(data, "itemId");
-  const existing = await prisma.item.findFirst({ where: { id: itemId, eventId } });
-  if (!existing) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-  const target = `${listPath(eventId, existing.listOwnerId)}/items/${itemId}/edit`;
-  await requireItemEditor(eventId, existing.listOwnerId, itemId);
-  let fields;
-  try { fields = itemFields(data); } catch (error) { fail(target, error instanceof Error ? error.message : "No s’ha pogut desar el regal."); }
-  let imagePath: string | undefined;
-  try { imagePath = await saveImage(data.get("image")); } catch (error) { fail(target, error instanceof Error ? error.message : "No s’ha pogut pujar la imatge."); }
-  await prisma.item.update({ where: { id: itemId }, data: { ...fields!, ...(imagePath ? { imagePath } : {}) } });
-  if (imagePath) await removeImage(existing.imagePath);
-  revalidatePath(listPath(eventId, existing.listOwnerId));
-  redirect(listPath(eventId, existing.listOwnerId));
+  const existing = await findEntry(eventId, itemId);
+  const ownerId = existing.item.ownerId;
+  const target = `${listPath(eventId, ownerId)}/items/${itemId}/edit`;
+  const { canEditContent } = await requireItemEditor(eventId, ownerId, itemId);
+  await prisma.eventItem.update({ where: { id: existing.id }, data: eventFields(data) });
+  if (canEditContent) {
+    const { fields, imagePath } = await readGift(data, target);
+    await prisma.item.update({ where: { id: itemId }, data: { ...fields, ...(imagePath ? { imagePath } : {}) } });
+    if (imagePath) await removeImages([existing.item.imagePath]);
+  }
+  revalidatePath(listPath(eventId, ownerId));
+  redirect(listPath(eventId, ownerId));
 }
 
+// Takes the gift out of this event. It is deleted only if it is in no list and no other event.
 export async function deleteItem(data: FormData) {
   const eventId = text(data, "eventId");
   const itemId = text(data, "itemId");
-  const item = await prisma.item.findFirst({ where: { id: itemId, eventId } });
-  if (!item) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-  await requireItemEditor(eventId, item.listOwnerId, itemId);
-  await prisma.item.delete({ where: { id: itemId } });
-  await removeImage(item.imagePath);
-  revalidatePath(listPath(eventId, item.listOwnerId));
-  redirect(listPath(eventId, item.listOwnerId));
+  const entry = await findEntry(eventId, itemId);
+  await requireItemEditor(eventId, entry.item.ownerId, itemId);
+  const images = await prisma.$transaction((tx) => removeEventEntries(tx, { id: entry.id }));
+  await removeImages(images);
+  revalidatePath(listPath(eventId, entry.item.ownerId));
+  redirect(listPath(eventId, entry.item.ownerId));
 }
 
 export async function moveItem(data: FormData) {
   const eventId = text(data, "eventId");
   const itemId = text(data, "itemId");
   const direction = text(data, "direction");
-  const item = await prisma.item.findFirst({ where: { id: itemId, eventId } });
-  if (!item) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-  await requireItemEditor(eventId, item.listOwnerId, itemId);
-  const items = await prisma.item.findMany({ where: { eventId, listOwnerId: item.listOwnerId }, orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] });
-  const index = items.findIndex((entry) => entry.id === itemId);
-  if (index < 0) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-  if (direction !== "up" && direction !== "down") fail(listPath(eventId, item.listOwnerId), "Ordre no vàlid.");
+  const entry = await findEntry(eventId, itemId);
+  const ownerId = entry.item.ownerId;
+  await requireItemEditor(eventId, ownerId, itemId);
+  if (direction !== "up" && direction !== "down") fail(listPath(eventId, ownerId), "Ordre no vàlid.");
+  const entries = await prisma.eventItem.findMany({ where: { eventId, item: { ownerId } }, orderBy: [{ sortOrder: "asc" }, { addedAt: "asc" }] });
+  const index = entries.findIndex((other) => other.id === entry.id);
   const adjacentIndex = index + (direction === "up" ? -1 : 1);
-  if (adjacentIndex >= 0 && adjacentIndex < items.length) {
-    const reordered = [...items];
+  if (index >= 0 && adjacentIndex >= 0 && adjacentIndex < entries.length) {
+    const reordered = [...entries];
     [reordered[index], reordered[adjacentIndex]] = [reordered[adjacentIndex], reordered[index]];
-    await prisma.$transaction(reordered.map((entry, order) => prisma.item.update({ where: { id: entry.id }, data: { sortOrder: order } })));
+    await prisma.$transaction(reordered.map((other, order) => prisma.eventItem.update({ where: { id: other.id }, data: { sortOrder: order } })));
   }
-  revalidatePath(listPath(eventId, item.listOwnerId));
-  redirect(listPath(eventId, item.listOwnerId));
+  revalidatePath(listPath(eventId, ownerId));
+  redirect(listPath(eventId, ownerId));
 }
 
 export async function toggleItemActive(data: FormData) {
   const eventId = text(data, "eventId");
   const itemId = text(data, "itemId");
-  const item = await prisma.item.findFirst({ where: { id: itemId, eventId } });
-  if (!item) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-  await requireItemEditor(eventId, item.listOwnerId, itemId);
-  await prisma.item.update({ where: { id: itemId }, data: { isActive: !item.isActive } });
-  revalidatePath(listPath(eventId, item.listOwnerId));
-  redirect(listPath(eventId, item.listOwnerId));
+  const entry = await findEntry(eventId, itemId);
+  await requireItemEditor(eventId, entry.item.ownerId, itemId);
+  await prisma.eventItem.update({ where: { id: entry.id }, data: { isActive: !entry.isActive } });
+  revalidatePath(listPath(eventId, entry.item.ownerId));
+  redirect(listPath(eventId, entry.item.ownerId));
 }
 
 export async function toggleItemEssential(data: FormData) {
   const eventId = text(data, "eventId");
   const itemId = text(data, "itemId");
-  const item = await prisma.item.findFirst({ where: { id: itemId, eventId } });
-  if (!item) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-  await requireItemEditor(eventId, item.listOwnerId, itemId);
-  await prisma.item.update({ where: { id: itemId }, data: { isEssential: !item.isEssential } });
-  revalidatePath(listPath(eventId, item.listOwnerId));
-  redirect(listPath(eventId, item.listOwnerId));
+  const entry = await findEntry(eventId, itemId);
+  await requireItemEditor(eventId, entry.item.ownerId, itemId);
+  await prisma.eventItem.update({ where: { id: entry.id }, data: { isEssential: !entry.isEssential } });
+  revalidatePath(listPath(eventId, entry.item.ownerId));
+  redirect(listPath(eventId, entry.item.ownerId));
 }
+
+// ————— Reservations (per event) —————
 
 // A group gift is SHARED when no number is given, or HELP when it needs a set number of extra people.
 function groupMode(data: FormData, target: string): { reservationMode: ReservationMode; helpersNeeded: number | null } {
@@ -474,13 +516,14 @@ export async function reserveItem(data: FormData) {
   const eventId = text(data, "eventId");
   const itemId = text(data, "itemId");
   const { user } = await requireMembership(eventId);
-  const item = await prisma.item.findFirst({ where: { id: itemId, eventId } });
-  if (!item) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-  const target = listPath(eventId, item.listOwnerId);
-  if (item.listOwnerId === user.id) fail(target, "No pots reservar un regal de la teva pròpia llista.");
+  const entry = await findEntry(eventId, itemId);
+  const target = listPath(eventId, entry.item.ownerId);
+  if (entry.item.ownerId === user.id) fail(target, "No pots reservar un regal de la teva pròpia llista.");
+  // The same gift reserved in another event counts as taken: nobody should buy it twice
+  if (await prisma.eventItem.count({ where: { itemId, eventId: { not: eventId }, reservedById: { not: null } } })) fail(target, "Aquest regal ja està reservat en un altre esdeveniment.");
   const mode = text(data, "group") === "1" ? groupMode(data, target) : { reservationMode: "NONE" as ReservationMode, helpersNeeded: null };
-  const result = await prisma.item.updateMany({
-    where: { id: itemId, eventId, isActive: true, reservedById: null },
+  const result = await prisma.eventItem.updateMany({
+    where: { id: entry.id, isActive: true, reservedById: null },
     data: { reservedById: user.id, reservedAt: new Date(), ...mode },
   });
   if (!result.count) fail(target, "Aquest regal ja està agafat.");
@@ -491,14 +534,13 @@ export async function reserveItem(data: FormData) {
 export async function unreserveItem(data: FormData) {
   const eventId = text(data, "eventId");
   const itemId = text(data, "itemId");
-  const { user, membership } = await requireMembership(eventId);
-  const item = await prisma.item.findFirst({ where: { id: itemId, eventId } });
-  if (!item) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-  const target = listPath(eventId, item.listOwnerId);
-  if (item.reservedById !== user.id && !(await canModerateItemReservations(eventId, item, user.id))) fail(target, "No tens permisos per desmarcar aquest regal.");
+  const { user } = await requireMembership(eventId);
+  const entry = await findEntry(eventId, itemId);
+  const target = listPath(eventId, entry.item.ownerId);
+  if (entry.reservedById !== user.id && !(await canModerateItemReservations(eventId, entry.item, user.id))) fail(target, "No tens permisos per desmarcar aquest regal.");
   await prisma.$transaction([
-    prisma.item.update({ where: { id: itemId }, data: { reservedById: null, reservedAt: null, reservationMode: "NONE", helpersNeeded: null } }),
-    prisma.itemContribution.deleteMany({ where: { itemId } }),
+    prisma.eventItem.update({ where: { id: entry.id }, data: { reservedById: null, reservedAt: null, reservationMode: "NONE", helpersNeeded: null } }),
+    prisma.itemContribution.deleteMany({ where: { eventItemId: entry.id } }),
   ]);
   revalidatePath(target);
   redirect(target);
@@ -509,13 +551,12 @@ export async function changeReservationMode(data: FormData) {
   const itemId = text(data, "itemId");
   const mode = text(data, "mode");
   const helpersNeededInput = text(data, "helpersNeeded");
-  const { user, membership } = await requireMembership(eventId);
+  const { user } = await requireMembership(eventId);
   if (!(["NONE", "HELP", "SHARED", "GROUP"] as string[]).includes(mode)) fail(eventPath(eventId), "El tipus de regal no és vàlid.");
-  const item = await prisma.item.findFirst({ where: { id: itemId, eventId } });
-  if (!item) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-  const target = listPath(eventId, item.listOwnerId);
-  if (item.reservedById !== user.id && !(await canModerateItemReservations(eventId, item, user.id))) fail(target, "Només qui ha reservat o un responsable d’aquesta llista pot canviar aquest estat.");
-  if (!item.reservedById) fail(target, "Primer has de reservar el regal.");
+  const entry = await findEntry(eventId, itemId);
+  const target = listPath(eventId, entry.item.ownerId);
+  if (entry.reservedById !== user.id && !(await canModerateItemReservations(eventId, entry.item, user.id))) fail(target, "Només qui ha reservat o un responsable d’aquesta llista pot canviar aquest estat.");
+  if (!entry.reservedById) fail(target, "Primer has de reservar el regal.");
   let next: { reservationMode: ReservationMode; helpersNeeded: number | null };
   if (mode === "GROUP") next = groupMode(data, target);
   else {
@@ -526,8 +567,8 @@ export async function changeReservationMode(data: FormData) {
     next = { reservationMode: mode as ReservationMode, helpersNeeded };
   }
   await prisma.$transaction(async (tx) => {
-    await tx.item.update({ where: { id: itemId }, data: next });
-    if (next.reservationMode === "NONE") await tx.itemContribution.deleteMany({ where: { itemId } });
+    await tx.eventItem.update({ where: { id: entry.id }, data: next });
+    if (next.reservationMode === "NONE") await tx.itemContribution.deleteMany({ where: { eventItemId: entry.id } });
   });
   revalidatePath(target);
   redirect(target);
@@ -538,23 +579,22 @@ export async function addContribution(data: FormData) {
   const itemId = text(data, "itemId");
   const note = text(data, "note").slice(0, 160);
   const { user } = await requireMembership(eventId);
-  const item = await prisma.item.findFirst({ where: { id: itemId, eventId } });
-  if (!item) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-  const target = listPath(eventId, item.listOwnerId);
-  if (user.id === item.listOwnerId) fail(target, "No pots contribuir al teu propi regal.");
-  if (user.id === item.reservedById) fail(target, "Ja ets la persona que organitza aquest regal.");
+  const entry = await findEntry(eventId, itemId);
+  const target = listPath(eventId, entry.item.ownerId);
+  if (user.id === entry.item.ownerId) fail(target, "No pots contribuir al teu propi regal.");
+  if (user.id === entry.reservedById) fail(target, "Ja ets la persona que organitza aquest regal.");
   try {
     await prisma.$transaction(async (tx) => {
-      await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "Item" WHERE "id" = ${itemId} AND "eventId" = ${eventId} FOR UPDATE`;
-      const lockedItem = await tx.item.findFirst({ where: { id: itemId, eventId } });
-      if (!lockedItem) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
-      if (lockedItem.reservationMode === "NONE" || !lockedItem.reservedById) fail(target, "Aquest regal no demana ajuda ni és compartit.");
-      if (lockedItem.reservedById === user.id) fail(target, "Ja ets la persona que organitza aquest regal.");
-      if (lockedItem.reservationMode === "HELP") {
-        const currentHelpers = await tx.itemContribution.count({ where: { itemId } });
-        if (currentHelpers >= (lockedItem.helpersNeeded ?? 0)) fail(target, "Ja hi ha prou persones ajudant en aquest regal.");
+      await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "EventItem" WHERE "id" = ${entry.id} FOR UPDATE`;
+      const locked = await tx.eventItem.findUnique({ where: { id: entry.id } });
+      if (!locked) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
+      if (locked.reservationMode === "NONE" || !locked.reservedById) fail(target, "Aquest regal no demana ajuda ni és compartit.");
+      if (locked.reservedById === user.id) fail(target, "Ja ets la persona que organitza aquest regal.");
+      if (locked.reservationMode === "HELP") {
+        const currentHelpers = await tx.itemContribution.count({ where: { eventItemId: entry.id } });
+        if (currentHelpers >= (locked.helpersNeeded ?? 0)) fail(target, "Ja hi ha prou persones ajudant en aquest regal.");
       }
-      await tx.itemContribution.create({ data: { itemId, userId: user.id, note: optional(note) } });
+      await tx.itemContribution.create({ data: { eventItemId: entry.id, userId: user.id, note: optional(note) } });
     });
   }
   catch (error) {
@@ -568,12 +608,146 @@ export async function addContribution(data: FormData) {
 export async function removeContribution(data: FormData) {
   const eventId = text(data, "eventId");
   const contributionId = text(data, "contributionId");
-  const { user, membership } = await requireMembership(eventId);
-  const contribution = await prisma.itemContribution.findFirst({ where: { id: contributionId, item: { eventId } }, include: { item: true } });
+  const { user } = await requireMembership(eventId);
+  const contribution = await prisma.itemContribution.findFirst({ where: { id: contributionId, eventItem: { eventId } }, include: { eventItem: { include: { item: true } } } });
   if (!contribution) redirect(`${eventPath(eventId)}?error=${encodeURIComponent("No s’ha trobat la contribució.")}`);
-  const target = listPath(eventId, contribution.item.listOwnerId);
-  if (contribution.userId !== user.id && contribution.item.reservedById !== user.id && !(await canModerateItemReservations(eventId, contribution.item, user.id))) fail(target, "No tens permisos per eliminar aquesta contribució.");
+  const { eventItem } = contribution;
+  const target = listPath(eventId, eventItem.item.ownerId);
+  if (contribution.userId !== user.id && eventItem.reservedById !== user.id && !(await canModerateItemReservations(eventId, eventItem.item, user.id))) fail(target, "No tens permisos per eliminar aquesta contribució.");
   await prisma.itemContribution.delete({ where: { id: contributionId } });
   revalidatePath(target);
   redirect(target);
+}
+
+// ————— Personal lists —————
+
+const listName = (data: FormData, target: string) => {
+  const name = text(data, "name");
+  if (!name || name.length > 80) fail(target, "El nom de la llista és obligatori (màxim 80 caràcters).");
+  return name;
+};
+
+export async function createList(data: FormData) {
+  const user = await requireUser();
+  const name = listName(data, "/lists");
+  const list = await prisma.wishList.create({ data: { ownerId: user.id, name } });
+  revalidatePath("/lists");
+  redirect(myListPath(list.id));
+}
+
+export async function renameList(data: FormData) {
+  const listId = text(data, "listId");
+  const { list } = await requireOwnList(listId);
+  const name = listName(data, myListPath(list.id));
+  await prisma.wishList.update({ where: { id: list.id }, data: { name } });
+  revalidatePath("/lists");
+  redirect(`${myListPath(list.id)}?saved=1`);
+}
+
+// Deletes the list. Its gifts stay if they are in another list or in an event.
+export async function deleteList(data: FormData) {
+  const listId = text(data, "listId");
+  const { list } = await requireOwnList(listId);
+  const images = await prisma.$transaction(async (tx) => {
+    const entries = await tx.listItem.findMany({ where: { listId: list.id }, select: { itemId: true } });
+    await tx.wishList.delete({ where: { id: list.id } });
+    return deleteOrphanItems(tx, entries.map((entry) => entry.itemId));
+  });
+  await removeImages(images);
+  revalidatePath("/lists");
+  redirect("/lists?deleted=1");
+}
+
+export async function createListItem(data: FormData) {
+  const listId = text(data, "listId");
+  const { user, list } = await requireOwnList(listId);
+  const { fields, imagePath } = await readGift(data, `${myListPath(list.id)}/items/new`);
+  await prisma.$transaction(async (tx) => {
+    const item = await tx.item.create({ data: { ...fields, imagePath: imagePath ?? null, ownerId: user.id, createdBy: user.id } });
+    await tx.listItem.create({ data: { listId: list.id, itemId: item.id, sortOrder: await nextListOrder(tx, list.id) } });
+  });
+  revalidatePath(myListPath(list.id));
+  redirect(myListPath(list.id));
+}
+
+async function requireListEntry(data: FormData) {
+  const listId = text(data, "listId");
+  const itemId = text(data, "itemId");
+  const { user, list } = await requireOwnList(listId);
+  const entry = await prisma.listItem.findUnique({ where: { listId_itemId: { listId: list.id, itemId } }, include: { item: true } });
+  if (!entry || entry.item.ownerId !== user.id) redirect(`${myListPath(list.id)}?error=${encodeURIComponent("No s’ha trobat el regal.")}`);
+  return { user, list, entry };
+}
+
+export async function updateListItem(data: FormData) {
+  const { list, entry } = await requireListEntry(data);
+  const { fields, imagePath } = await readGift(data, `${myListPath(list.id)}/items/${entry.itemId}/edit`);
+  await prisma.item.update({ where: { id: entry.itemId }, data: { ...fields, ...(imagePath ? { imagePath } : {}) } });
+  if (imagePath) await removeImages([entry.item.imagePath]);
+  revalidatePath(myListPath(list.id));
+  redirect(myListPath(list.id));
+}
+
+// Takes the gift out of this list. It is deleted only if it is in no other list and no event.
+export async function removeListItem(data: FormData) {
+  const { list, entry } = await requireListEntry(data);
+  const images = await prisma.$transaction(async (tx) => {
+    await tx.listItem.delete({ where: { listId_itemId: { listId: list.id, itemId: entry.itemId } } });
+    return deleteOrphanItems(tx, [entry.itemId]);
+  });
+  await removeImages(images);
+  revalidatePath(myListPath(list.id));
+  redirect(myListPath(list.id));
+}
+
+export async function moveListItem(data: FormData) {
+  const { list, entry } = await requireListEntry(data);
+  const direction = text(data, "direction");
+  if (direction !== "up" && direction !== "down") fail(myListPath(list.id), "Ordre no vàlid.");
+  const entries = await prisma.listItem.findMany({ where: { listId: list.id }, orderBy: [{ sortOrder: "asc" }, { addedAt: "asc" }] });
+  const index = entries.findIndex((other) => other.itemId === entry.itemId);
+  const adjacentIndex = index + (direction === "up" ? -1 : 1);
+  if (index >= 0 && adjacentIndex >= 0 && adjacentIndex < entries.length) {
+    const reordered = [...entries];
+    [reordered[index], reordered[adjacentIndex]] = [reordered[adjacentIndex], reordered[index]];
+    await prisma.$transaction(reordered.map((other, order) => prisma.listItem.update({ where: { listId_itemId: { listId: list.id, itemId: other.itemId } }, data: { sortOrder: order } })));
+  }
+  revalidatePath(myListPath(list.id));
+  redirect(myListPath(list.id));
+}
+
+// Adds gifts I already have (from my other lists) to this list, without copying them
+export async function addGiftsToList(data: FormData) {
+  const listId = text(data, "listId");
+  const { user, list } = await requireOwnList(listId);
+  const itemIds = [...new Set(data.getAll("itemId").map(String).filter(Boolean))];
+  if (!itemIds.length) fail(`${myListPath(list.id)}/add`, "Tria almenys un regal.");
+  const mine = await prisma.item.findMany({ where: { id: { in: itemIds }, ownerId: user.id, isHiddenFromListOwner: false, listEntries: { none: { listId: list.id } } }, select: { id: true } });
+  await prisma.$transaction(async (tx) => {
+    let order = await nextListOrder(tx, list.id);
+    await tx.listItem.createMany({ data: mine.map((item) => ({ listId: list.id, itemId: item.id, sortOrder: order++ })), skipDuplicates: true });
+  });
+  revalidatePath(myListPath(list.id));
+  redirect(`${myListPath(list.id)}?added=${mine.length}`);
+}
+
+// Puts my chosen gifts into my display in an event. A gift that is in several lists is added
+// once (same id), and gifts already in the event are skipped.
+export async function addGiftsToEvent(data: FormData) {
+  const eventId = text(data, "eventId");
+  const { user, event } = await requireMembership(eventId);
+  const target = `${eventPath(eventId)}/import`;
+  if (event.listMode === "SINGLE_LIST" && event.primaryListOwnerId !== user.id) fail(eventPath(eventId), "En aquest esdeveniment només hi ha una llista principal.");
+  const itemIds = [...new Set(data.getAll("itemId").map(String).filter(Boolean))];
+  if (!itemIds.length) fail(`${target}?${new URLSearchParams(data.getAll("listId").map((id) => ["lists", String(id)])).toString()}`, "Tria almenys un regal.");
+  const mine = await prisma.item.findMany({ where: { id: { in: itemIds }, ownerId: user.id, isHiddenFromListOwner: false, eventEntries: { none: { eventId } } }, select: { id: true } });
+  const order = new Map(itemIds.map((id, index) => [id, index]));
+  mine.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
+  await prisma.$transaction(async (tx) => {
+    let sortOrder = await nextEventOrder(tx, eventId, user.id);
+    await tx.eventItem.createMany({ data: mine.map((item) => ({ eventId, itemId: item.id, sortOrder: sortOrder++ })), skipDuplicates: true });
+  });
+  revalidatePath(eventPath(eventId));
+  revalidatePath(listPath(eventId, user.id));
+  redirect(`${listPath(eventId, user.id)}?added=${mine.length}`);
 }

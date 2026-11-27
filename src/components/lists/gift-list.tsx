@@ -1,11 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Pencil } from "lucide-react";
+import { ListPlus, Pencil } from "lucide-react";
 import { renameManagedProfile } from "@/app/actions";
 import { ClearListButton, RemoveMemberButton } from "@/components/events/member-controls";
 import { ItemCard } from "@/components/items/item-card";
 import { CopyButton } from "@/components/ui/copy-button";
 import { prisma } from "@/lib/db";
+import { reservedInOtherEvents } from "@/lib/gifts";
 import { isManager, listAccess } from "@/lib/permissions";
 import { translate } from "@/lib/i18n/dictionary";
 import type { Locale } from "@/lib/i18n/shared";
@@ -14,10 +15,10 @@ import type { Locale } from "@/lib/i18n/shared";
 // directly on the event page ("embedded").
 export async function GiftList({ eventId, memberId, locale, variant, flags }: {
   eventId: string; memberId: string; locale: Locale; variant: "page" | "embedded";
-  flags: { error?: string; saved?: string; cleared?: string };
+  flags: { error?: string; saved?: string; cleared?: string; added?: string };
 }) {
   const t = (s: string) => translate(locale, s);
-  const { error, saved, cleared } = flags;
+  const { error, saved, cleared, added } = flags;
   const [access, targetMember] = await Promise.all([
     listAccess(eventId, memberId),
     prisma.eventMember.findUnique({ where: { eventId_userId: { eventId, userId: memberId } }, include: { user: true } }),
@@ -29,15 +30,21 @@ export async function GiftList({ eventId, memberId, locale, variant, flags }: {
   const canModerateReservations = !isRecipient && (access.owner || access.canEditAll || access.canEditOwnHidden);
   const canCreate = access.canCreate;
   const canShareClaim = targetMember.user.isManagedProfile && Boolean(access.owner || access.responsibleForAll || access.responsibility);
-  const items = await prisma.item.findMany({
+  // This person's gifts in this event (their "display"): one entry per gift, whatever lists it came from
+  const items = await prisma.eventItem.findMany({
     where: {
-      eventId, listOwnerId: memberId,
-      ...(isRecipient ? { isHiddenFromListOwner: false } : access.canViewList ? {} : { createdBy: user.id, isHiddenFromListOwner: true }),
+      eventId,
+      item: { ownerId: memberId, ...(isRecipient ? { isHiddenFromListOwner: false } : access.canViewList ? {} : { createdBy: user.id, isHiddenFromListOwner: true }) },
       ...(canEdit ? {} : { isActive: true }),
     },
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-    include: { reservedBy: { select: { id: true, name: true } }, contributions: { include: { user: { select: { id: true, name: true } } }, orderBy: { createdAt: "asc" } } },
+    orderBy: [{ sortOrder: "asc" }, { addedAt: "asc" }],
+    include: {
+      item: { include: { _count: { select: { listEntries: true, eventEntries: true } } } },
+      reservedBy: { select: { id: true, name: true } },
+      contributions: { include: { user: { select: { id: true, name: true } } }, orderBy: { createdAt: "asc" } },
+    },
   });
+  const reservedElsewhere = await reservedInOtherEvents(eventId, items.map((entry) => entry.itemId));
   const activeCount = items.filter((item) => item.isActive).length;
   const reservedCount = items.filter((item) => item.isActive && item.reservedById && (item.reservationMode !== "HELP" || item.contributions.length >= (item.helpersNeeded ?? 0))).length;
   const hideReservationDetails = event.hideReservationFromOwner && isRecipient;
@@ -57,13 +64,16 @@ export async function GiftList({ eventId, memberId, locale, variant, flags }: {
     : access.canEditOwnHidden ? t("Ets responsable d’aquest perfil: pots editar els regals que hi afegeixes tu.")
     : t("Pots editar aquesta llista perquè ets responsable d’aquest perfil.");
   const addHref = `/events/${eventId}/members/${memberId}/items/new`;
+  // My own display: bring gifts from my personal lists
+  const importHref = isRecipient && canCreate ? `/events/${eventId}/import` : null;
+  const importLink = importHref && <Link href={importHref} className="button button-outline button-small"><ListPlus size={16} aria-hidden /> {t("Afegir des de les meves llistes")}</Link>;
   return <>
     {variant === "page"
       ? <div className="list-header"><div><p className="eyebrow">{t("Llista de regals")}</p><h1>{targetMember.user.name}</h1></div>
-          {canCreate && <Link href={addHref} className="button button-primary">＋ {t("Afegir regal")}</Link>}
+          <div className="toolbar">{importLink}{canCreate && <Link href={addHref} className="button button-primary">＋ {t("Afegir regal")}</Link>}</div>
         </div>
       : <div className="section-heading"><h2>{isRecipient ? t("La teva llista") : `${t("Llista de")} ${targetMember.user.name}`}</h2>
-          {canCreate && <Link href={addHref} className="button button-primary button-small">＋ {t("Afegir regal")}</Link>}
+          <div className="toolbar">{importLink}{canCreate && <Link href={addHref} className="button button-primary button-small">＋ {t("Afegir regal")}</Link>}</div>
         </div>}
     {hideReservationDetails ? <p className="privacy-note">{t("L’estat dels regals s’amaga per preservar la sorpresa.")}</p> : <p className="muted small list-progress">{reservedCount}/{activeCount} {t("regals reservats")}</p>}
     {!access.canViewList && <p className="privacy-note">{t("Només veus els regals que has afegit a aquest perfil.")}</p>}
@@ -72,6 +82,7 @@ export async function GiftList({ eventId, memberId, locale, variant, flags }: {
     {error && <p className="alert">{t(error)}</p>}
     {saved && <p className="success-note">{t("Els canvis s’han desat.")}</p>}
     {cleared && <p className="success-note">{t("S’ha buidat la llista.")}</p>}
+    {added !== undefined && <p className="success-note">{added === "0" ? t("Aquests regals ja eren a l’esdeveniment.") : t("S’han afegit {count} regals.").replace("{count}", added)}</p>}
     {(canRename || canClear || canRemove) && <details className="profile-create-details list-manage">
       <summary>{isProfile ? t("Gestionar el perfil") : t("Gestionar la llista")}</summary>
       <div className="profile-create-form">
@@ -84,13 +95,16 @@ export async function GiftList({ eventId, memberId, locale, variant, flags }: {
           {canClear && <ClearListButton eventId={eventId} userId={memberId} name={targetMember.user.name} />}
           {canRemove && <RemoveMemberButton eventId={eventId} userId={memberId} name={targetMember.user.name} isProfile={isProfile} returnTo="event" />}
         </div>}
-        {(canClear || canRemove) && <span className="field-help">{isProfile ? t("Buidar la llista esborra els regals però manté el perfil. Eliminar el perfil l’esborra de l’esdeveniment amb la seva llista.") : t("Buidar la llista esborra els regals però la persona continua a l’esdeveniment. Eliminar-la també treu les seves reserves i contribucions.")}</span>}
+        {(canClear || canRemove) && <span className="field-help">{isProfile ? t("Buidar la llista esborra els regals però manté el perfil. Eliminar el perfil l’esborra de l’esdeveniment amb la seva llista.") : t("Buidar la llista treu els regals d’aquest esdeveniment (no de les llistes personals) i la persona continua a l’esdeveniment. Eliminar-la també treu les seves reserves i contribucions.")}</span>}
       </div>
     </details>}
-    {items.length ? <div className="item-list">{items.map((item, index) => {
-      const safeItem = hideReservationDetails ? { ...item, reservedById: null, reservedAt: null, reservedBy: null, reservationMode: "NONE" as typeof item.reservationMode, helpersNeeded: null, contributions: [] } : item;
-      return <ItemCard key={item.id} item={safeItem} eventId={eventId} currentUserId={user.id} canEdit={canEdit} canModerateReservations={canModerateReservations} hideReservationDetails={hideReservationDetails} first={index === 0} last={index === items.length - 1} />;
+    {items.length ? <div className="item-list">{items.map((entry, index) => {
+      // The person on the list must not learn anything about reservations (here or elsewhere)
+      const safeEntry = hideReservationDetails ? { ...entry, reservedById: null, reservedAt: null, reservedBy: null, reservationMode: "NONE" as typeof entry.reservationMode, helpersNeeded: null, contributions: [] } : entry;
+      const sharedElsewhere = entry.item._count.listEntries > 0 || entry.item._count.eventEntries > 1;
+      return <ItemCard key={entry.id} entry={safeEntry} currentUserId={user.id} canEdit={canEdit} canModerateReservations={canModerateReservations} hideReservationDetails={hideReservationDetails}
+        reservedElsewhere={!hideReservationDetails && reservedElsewhere.has(entry.itemId)} sharedElsewhere={sharedElsewhere} first={index === 0} last={index === items.length - 1} />;
     })}</div>
-      : <div className="empty-state"><h3>{canCreate ? t("La llista encara és buida") : t("Encara no hi ha regals")}</h3><p className="small">{canCreate ? t("Afegeix una idea o un desig a aquesta llista.") : t("Torna més tard, potser apareixerà alguna idea.")}</p>{canCreate && <Link className="button button-primary" href={addHref}>{t("Afegir regal")}</Link>}</div>}
+      : <div className="empty-state"><h3>{canCreate ? t("La llista encara és buida") : t("Encara no hi ha regals")}</h3><p className="small">{canCreate ? t("Afegeix una idea o un desig a aquesta llista.") : t("Torna més tard, potser apareixerà alguna idea.")}</p>{canCreate && <div className="toolbar empty-actions">{importHref && <Link className="button button-outline" href={importHref}><ListPlus size={16} aria-hidden /> {t("Afegir des de les meves llistes")}</Link>}<Link className="button button-primary" href={addHref}>{t("Afegir regal")}</Link></div>}</div>}
   </>;
 }

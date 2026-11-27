@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, LogOut } from "lucide-react";
+import Link from "next/link";
+import { ChevronDown, ListChecks, LogOut } from "lucide-react";
 import { logout } from "@/app/actions";
 import { useLocale } from "@/components/i18n/locale-provider";
 import styles from "./user-menu.module.css";
 
-// Avatar button with a small menu: who is signed in and the option to sign out.
+// Avatar button with a small menu: who is signed in, my lists and the option to sign out.
 export function UserMenu({ name }: { name: string }) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
@@ -31,6 +32,7 @@ export function UserMenu({ name }: { name: string }) {
       </button>
       {open && <div className={styles.menu} role="menu">
         <p className={styles.signedIn}>{t("Has iniciat sessió com a")}<br /><strong>{name}</strong></p>
+        <Link className={styles.item} href="/lists" role="menuitem" onClick={() => setOpen(false)}><ListChecks size={17} aria-hidden /> {t("Les meves llistes")}</Link>
         <form action={logout}>
           <button className={styles.item} type="submit" role="menuitem"><LogOut size={17} aria-hidden /> {t("Tancar sessió")}</button>
         </form>
